@@ -834,16 +834,23 @@ export const make = Effect.gen(function* () {
             const records: Array<DecodedTranscriptRecord> = [];
             let cwd = Option.none<string>();
             let claudeFields = emptyClaudeFields;
+            const recordSizes: Array<number> = [];
             let historyBytes = 0;
             let recordBytes = 0;
             let recordCount = 0;
             let bytesRead = 0;
+            // A long session's history passes the budget; only its latest messages are shown and
+            // the resumed session carries its own context, so the oldest kept records go first.
             const reserve = (bytes: number) => {
               recordBytes += bytes;
-              if (historyBytes + recordBytes > MAX_IMPORT_HISTORY_BYTES) {
+              if (recordBytes > MAX_IMPORT_HISTORY_BYTES) {
                 throw new TranscriptJsonLimitError(
-                  "Transcript selected history exceeds the 32 MiB memory budget",
+                  "Transcript record exceeds the 32 MiB memory budget",
                 );
+              }
+              while (historyBytes + recordBytes > MAX_IMPORT_HISTORY_BYTES && records.length > 0) {
+                records.shift();
+                historyBytes -= recordSizes.shift() ?? 0;
               }
             };
             let reader = createTranscriptJsonReader(reserve, selectTranscriptPath);
@@ -862,6 +869,7 @@ export const make = Effect.gen(function* () {
                 }
                 if (shouldRetainDecodedRecord(source, decoded.value)) {
                   records.push(decoded.value);
+                  recordSizes.push(recordBytes);
                   historyBytes += recordBytes;
                 }
               }
