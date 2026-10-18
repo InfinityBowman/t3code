@@ -1,5 +1,6 @@
 import { McpAttachmentInput } from "../attachment/input.ts";
 import {
+  AgentSessionImportResult,
   NonNegativeInt,
   ModelSelection,
   TrimmedNonEmptyString,
@@ -24,6 +25,7 @@ import * as ThreadLaunchService from "../../../orchestration-v2/ThreadLaunchServ
 import * as Crypto from "effect/Crypto";
 import * as Schema from "effect/Schema";
 import { Tool, Toolkit } from "effect/ai";
+import * as AgentSessionImporter from "../../../project/AgentSessionImporter.ts";
 import * as ProjectService from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as ThreadManagementService from "../../../orchestration-v2/ThreadManagementService.ts";
@@ -151,6 +153,18 @@ const ThreadLaunchTool = Tool.make("t3_thread_launch", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const ProjectImportSessionsTool = Tool.make("t3_project_import_sessions", {
+  ...shared,
+  description:
+    "Import the named Claude or Codex sessions that ran in this project's folder as T3 threads, each resuming its own session with its full context. Stop a session wherever else it runs first: the imported thread drives it from then on. Sessions already imported are left as they are.",
+  parameters: Schema.Struct({
+    projectId: ProjectId,
+    providerSessionIds: Schema.Array(Schema.String).check(Schema.isMinLength(1)),
+  }),
+  success: AgentSessionImportResult,
+  dependencies: [...shared.dependencies, AgentSessionImporter.AgentSessionImporter],
+}).annotate(Tool.Destructive, false);
+
 export const ProjectToolkit = Toolkit.make(
   ThreadLaunchTool,
   ProjectListTool,
@@ -159,4 +173,5 @@ export const ProjectToolkit = Toolkit.make(
   ProjectUpdateTool,
   ProjectDeleteTool,
   ProjectCloneTool,
+  ProjectImportSessionsTool,
 );

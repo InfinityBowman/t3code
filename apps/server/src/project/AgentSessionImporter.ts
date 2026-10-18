@@ -212,6 +212,8 @@ const make = Effect.gen(function* () {
       return payload.value.importedTranscripts ?? [];
     });
     const outcomes = scanner.recentThreads(project.workspaceRoot, completedSources);
+    const wanted =
+      input.providerSessionIds === undefined ? undefined : new Set(input.providerSessionIds);
     const importedThreadIds = new Set<ThreadId>();
     let importedCount = 0;
     let skippedCount = 0;
@@ -223,6 +225,7 @@ const make = Effect.gen(function* () {
           return;
         }
         const source = outcome.source;
+        if (wanted !== undefined && !wanted.has(source.providerSessionId)) return;
         const threadId = ThreadId.make(
           `import:${source.providerInstanceId}:${source.providerSessionId}`,
         );

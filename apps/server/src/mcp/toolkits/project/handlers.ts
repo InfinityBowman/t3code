@@ -5,6 +5,7 @@ import * as Option from "effect/Option";
 import * as ThreadLaunch from "../../../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadMessageIntake from "../../../orchestration-v2/ThreadMessageIntake.ts";
 import * as Claims from "../../../orchestration-v2/AttachmentClaims.ts";
+import * as AgentSessionImporter from "../../../project/AgentSessionImporter.ts";
 import * as Project from "../../../project/ProjectService.ts";
 import * as ManagedProjectFolders from "../../../project/ManagedProjectFolders.ts";
 import * as Repositories from "../../../sourceControl/SourceControlRepositoryService.ts";
@@ -262,6 +263,19 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       return yield* projects
         .delete({ ...input, commandId: yield* newCommandId() })
         .pipe(Effect.mapError(projectFailure));
+    }),
+  ),
+  t3_project_import_sessions: McpToolAccess.writesEnvironment((input) =>
+    Effect.gen(function* () {
+      const importer = yield* AgentSessionImporter.AgentSessionImporter;
+      return yield* importer
+        .importRecentAgentThreads(input)
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
+          ),
+        );
     }),
   ),
   t3_project_clone: McpToolAccess.writesEnvironment((input) =>
