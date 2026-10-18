@@ -1243,6 +1243,8 @@ function claudeLiveSelectionFlagSettings(
 export function makeClaudeQueryOptions(input: {
   readonly modelSelection: ModelSelection;
   readonly nativeThreadId: string;
+  /** The session's display name, which other Claude sessions on the machine address it by. */
+  readonly sessionName?: string;
   readonly resume: boolean;
   readonly resumeSessionAt?: string;
   readonly cwd: string | null;
@@ -1281,6 +1283,11 @@ export function makeClaudeQueryOptions(input: {
     extraArgs["thinking-display"] !== "omitted";
   if (requestThinkingSummaries && extraArgs["thinking-display"] === undefined) {
     extraArgs["thinking-display"] = "summarized";
+  }
+  // Every process for a thread carries its title, so the name survives a restart or a move
+  // to another account.
+  if (input.sessionName !== undefined && extraArgs.name === undefined) {
+    extraArgs.name = input.sessionName;
   }
   const threadIdentity: ClaudeAgentSdkThreadIdentity = input.resume
     ? { resume: input.nativeThreadId }
@@ -9145,6 +9152,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           const queryOptions = makeClaudeQueryOptions({
             modelSelection: turnInput.modelSelection,
             nativeThreadId,
+            sessionName: turnInput.appThread.title,
             resume: shouldResume,
             ...(resumeSessionAt === undefined ? {} : { resumeSessionAt }),
             cwd: turnInput.runtimePolicy.cwd,

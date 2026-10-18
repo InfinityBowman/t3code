@@ -262,6 +262,20 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
     assert.notInclude(options.settings ?? {}, { showThinkingSummaries: true });
   });
 
+  it("names every session after its thread unless the launch args name it", () => {
+    const named = (launchArgs: string) =>
+      ClaudeAdapterV2.makeClaudeQueryOptions({
+        modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+        nativeThreadId: "named-thread",
+        sessionName: "Live trading manager",
+        resume: true,
+        cwd: "/workspace",
+        settings: { ...DEFAULT_CLAUDE_SETTINGS, launchArgs },
+      }).extraArgs?.name;
+    assert.equal(named(""), "Live trading manager");
+    assert.equal(named("--name pinned"), "pinned");
+  });
+
   it("does not enable thinking when the model option disables it", () => {
     const options = ClaudeAdapterV2.makeClaudeQueryOptions({
       modelSelection: {
