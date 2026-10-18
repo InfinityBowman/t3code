@@ -1,5 +1,11 @@
+// @effect-diagnostics nodeBuiltinImport:off - empty temporary Claude homes for the session count.
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
 import { assert, it } from "@effect/vitest";
 import {
+  ProviderDriverKind,
   ProviderInstanceId,
   RunId,
   ThreadId,
@@ -23,6 +29,17 @@ const b = ProviderInstanceId.make("claude_b");
 const threadId = ThreadId.make("thread:limited");
 const runId = RunId.make("run:limited");
 const modelSelection = { instanceId: a, model: "claude-opus-5-5" };
+// Empty homes, so the session counts never read this machine's transcripts.
+const home = fs.mkdtempSync(path.join(os.tmpdir(), "pool-sweep-"));
+const providerInstances = Object.fromEntries(
+  [a, b].map((instanceId) => [
+    instanceId,
+    {
+      driver: ProviderDriverKind.make("claudeAgent"),
+      config: { homePath: path.join(home, instanceId) },
+    },
+  ]),
+);
 
 const account = (instanceId: ProviderInstanceId, usedPercent: number, resetsAt: string) =>
   ({
@@ -38,6 +55,7 @@ const account = (instanceId: ProviderInstanceId, usedPercent: number, resetsAt: 
 
 const sweepOnce = (input: {
   readonly aResetsAt: string;
+  readonly aUsed?: number;
   readonly running: boolean;
   readonly failed: boolean;
 }) =>
@@ -61,10 +79,10 @@ const sweepOnce = (input: {
       snoozedUntil: null,
     } as unknown as ProjectionStore.ProjectionLimitRecoveryCandidate;
     const layer = Layer.mergeAll(
-      ServerSettings.layerTest({ accountPool: [a, b] }),
+      ServerSettings.layerTest({ accountPool: [a, b], providerInstances }),
       Layer.mock(ProviderRegistry.ProviderRegistry)({
         getProviders: Effect.succeed([
-          account(a, 100, input.aResetsAt),
+          account(a, input.aUsed ?? 100, input.aResetsAt),
           account(b, 5, "2026-10-21T23:00:00.000Z"),
         ]),
       }),
@@ -75,6 +93,7 @@ const sweepOnce = (input: {
               id: threadId,
               providerInstanceId: a,
               modelSelection,
+              createdAt: DateTime.makeUnsafe(now - 3_600_000),
               runningRunId: input.running ? runId : null,
             },
           ]),
@@ -134,5 +153,22 @@ it.effect("waits out a limit that lifts within half an hour", () =>
       failed: true,
     });
     assert.deepEqual(dispatched, []);
+  }),
+);
+
+it.effect("moves a running thread off an account whose weekly use would pass its room", () =>
+  Effect.gen(function* () {
+    const dispatched = yield* sweepOnce({
+      aResetsAt: "2026-10-19T19:00:00.000Z",
+      aUsed: 97,
+      running: true,
+      failed: false,
+    });
+    const [switched, message] = dispatched;
+    assert.equal(switched?.type === "provider.switch" && switched.modelSelection.instanceId, b);
+    assert.match(
+      message?.type === "message.dispatch" ? message.text : "",
+      /run out before its reset/,
+    );
   }),
 );

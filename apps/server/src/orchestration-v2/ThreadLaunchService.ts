@@ -42,12 +42,11 @@ import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
-import { pickPoolAccount } from "../provider/accountPool.ts";
+import { pickPoolAccount, poolLoad } from "../provider/accountPool.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
-import * as ProjectionStore from "./ProjectionStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
@@ -212,28 +211,26 @@ const make = Effect.gen(function* () {
   const ids = yield* IdAllocator.IdAllocatorV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
-  const projections = yield* ProjectionStore.ProjectionStoreV2;
   const preparationScope = yield* Scope.make("sequential");
 
   // Pooled accounts are interchangeable: a new thread starts on the one with room, and a
   // retried launch keeps the account its accepted create already chose.
   const poolSelection = (selection: ModelSelection, existingThreadId: ThreadId | undefined) =>
     Effect.gen(function* () {
-      const { accountPool } = yield* serverSettings.getSettings;
+      const { accountPool, providerInstances } = yield* serverSettings.getSettings;
       if (!accountPool.includes(selection.instanceId)) return selection;
       if (existingThreadId !== undefined) {
         const shell = yield* threads.getThreadShell(existingThreadId);
         return shell?.modelSelection ?? selection;
       }
-      const now = yield* DateTime.now;
+      const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
       const instanceId = pickPoolAccount({
         pool: accountPool,
         providers: yield* providerRegistry.getProviders,
-        activeThreads: yield* projections.getActiveThreads({
-          since: DateTime.subtract(now, { hours: 1 }),
-        }),
+        load: poolLoad(accountPool, providerInstances, nowMs),
         model: selection.model,
-        nowMs: DateTime.toEpochMillis(now),
+        nowMs,
+        fallback: true,
       });
       return instanceId === undefined ? selection : { ...selection, instanceId };
     }).pipe(

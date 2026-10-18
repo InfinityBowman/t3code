@@ -1,19 +1,31 @@
+// @effect-diagnostics nodeBuiltinImport:off - session counting stats Claude transcripts synchronously inside pure routing.
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
 import type {
   ProviderInstanceId,
   ServerProvider,
   ServerProviderUsageWindow,
 } from "@t3tools/contracts";
 
-// The last few percent stay with the threads already on an account, so a new one starts elsewhere.
-const SESSION_ROOM_PERCENT = 90;
-const WEEKLY_ROOM_PERCENT = 95;
-// Each active thread will keep spending, so a busy account counts as fuller than it reads and new
-// threads go elsewhere before its threads would have to move. First guesses, to tune on real burn.
-const SESSION_RESERVE_PER_ACTIVE_THREAD = 5;
-const WEEKLY_RESERVE_PER_ACTIVE_THREAD = 2;
+// An account has room while its projected use at each window's reset stays at or under these.
+const ROOM_PERCENT = { session: 90, weekly: 95 } as const;
+// Burn per active session (points an hour), a floor under the measured rate and its stand-in until an hour
+// of readings exists. On Oct 18, account A spent about 1.5 weekly points an hour across nine sessions.
+const SESSION_BURN_PER_HOUR = { session: 2.5, weekly: 0.2 } as const;
+const BURN_WINDOW_MS = 3 * 60 * 60 * 1000;
+const MIN_BURN_SPAN_MS = 45 * 60 * 1000;
+// A session counts as active while its transcript was written this recently.
+const ACTIVE_SESSION_MS = 15 * 60 * 1000;
+const SESSION_COUNT_TTL_MS = 60 * 1000;
 
 /** A limit lifting sooner than this is waited out: a move costs the thread its prompt cache. */
 export const ACCOUNT_MOVE_MIN_WAIT_MS = 30 * 60 * 1000;
+
+type Kind = keyof typeof ROOM_PERCENT;
+const kindOf = (window: ServerProviderUsageWindow): Kind =>
+  window.kind === "session" ? "session" : "weekly";
 
 // Model-scoped weekly windows (`seven_day_fable`) bind only threads on that model.
 function bindsModel(window: ServerProviderUsageWindow, model: string): boolean {
@@ -42,44 +54,180 @@ export function poolAccountBlockedUntil(
   return resets.length === 0 ? undefined : Math.max(...resets);
 }
 
+/** Each pooled account's usage readings over the last few hours, for its measured burn rate. */
+export function makeUsageHistory() {
+  const samples = new Map<string, Array<{ readonly atMs: number; readonly used: number }>>();
+  // One series per window period, so a reset starts a new one.
+  const key = (instanceId: ProviderInstanceId, window: ServerProviderUsageWindow) =>
+    `${instanceId}\0${window.id}\0${window.resetsAt ?? ""}`;
+  return {
+    record(providers: ReadonlyArray<ServerProvider>) {
+      for (const provider of providers) {
+        const checkedAt = provider.usageLimits?.checkedAt;
+        if (checkedAt === undefined) continue;
+        const atMs = Date.parse(checkedAt);
+        for (const window of provider.usageLimits?.windows ?? []) {
+          const series = samples.get(key(provider.instanceId, window)) ?? [];
+          if (series.at(-1)?.atMs === atMs) continue;
+          series.push({ atMs, used: window.usedPercent });
+          samples.set(
+            key(provider.instanceId, window),
+            series.filter((sample) => atMs - sample.atMs <= BURN_WINDOW_MS),
+          );
+        }
+      }
+    },
+    perHour(instanceId: ProviderInstanceId, window: ServerProviderUsageWindow, nowMs: number) {
+      const series = (samples.get(key(instanceId, window)) ?? []).filter(
+        (sample) => nowMs - sample.atMs <= BURN_WINDOW_MS,
+      );
+      const first = series[0];
+      const last = series.at(-1);
+      if (first === undefined || last === undefined || last.atMs - first.atMs < MIN_BURN_SPAN_MS)
+        return undefined;
+      return Math.max(0, ((last.used - first.used) * 3_600_000) / (last.atMs - first.atMs));
+    },
+  };
+}
+export type UsageHistory = ReturnType<typeof makeUsageHistory>;
+/** The server's one history: the recovery sweep records into it and every launch reads it. */
+export const usageHistory = makeUsageHistory();
+
+/** A Claude instance's config folder: its homePath, else Claude Code's default. */
+export function claudeHome(homePath: unknown): string {
+  const configured = typeof homePath === "string" ? homePath.trim() : "";
+  if (configured === "") return path.join(os.homedir(), ".claude");
+  return path.resolve(configured.replace(/^~(?=$|\/)/, os.homedir()));
+}
+
+const sessionCounts = new Map<string, { readonly atMs: number; readonly count: number }>();
 /**
- * The pooled account a thread on `model` should run on: of those signed in with room once
- * their active threads' reserve is counted, the one whose weekly window resets soonest, so
- * budget that is about to expire goes first.
+ * Claude sessions active on the account whose config folder is `home`, T3 threads and terminal tabs alike:
+ * every top-level transcript written in the last 15 minutes.
+ */
+export function activeSessions(home: string, nowMs: number): number {
+  const cached = sessionCounts.get(home);
+  if (cached !== undefined && nowMs - cached.atMs < SESSION_COUNT_TTL_MS) return cached.count;
+  let count = 0;
+  const projects = path.join(home, "projects");
+  for (const project of fs.existsSync(projects) ? fs.readdirSync(projects) : []) {
+    const directory = path.join(projects, project);
+    let files: Array<string> = [];
+    try {
+      files = fs.readdirSync(directory);
+    } catch {
+      continue;
+    }
+    for (const file of files) {
+      if (!file.endsWith(".jsonl")) continue;
+      try {
+        if (nowMs - fs.statSync(path.join(directory, file)).mtimeMs <= ACTIVE_SESSION_MS) count++;
+      } catch {}
+    }
+  }
+  sessionCounts.set(home, { atMs: nowMs, count });
+  return count;
+}
+
+export interface PoolLoad {
+  readonly sessions: ReadonlyMap<ProviderInstanceId, number>;
+  readonly history: UsageHistory;
+}
+
+/** The pool's load now, from each instance's configured home and the server's usage history. */
+export function poolLoad(
+  pool: ReadonlyArray<ProviderInstanceId>,
+  instances: Readonly<Record<string, { readonly config?: unknown } | undefined>>,
+  nowMs: number,
+): PoolLoad {
+  const homePath = (instanceId: ProviderInstanceId) =>
+    (instances[instanceId]?.config as { readonly homePath?: unknown } | undefined)?.homePath;
+  return {
+    sessions: new Map(
+      pool.map((instanceId) => [
+        instanceId,
+        activeSessions(claudeHome(homePath(instanceId)), nowMs),
+      ]),
+    ),
+    history: usageHistory,
+  };
+}
+
+/**
+ * How far past its room this account ends at each window's reset, with `extra` more sessions: the worst
+ * window's projected use minus its room, so a value over zero means it runs past it. Burn is the measured
+ * rate, never under its sessions' floor; each extra session adds an average session's share.
+ */
+export function poolAccountOverrun(
+  provider: ServerProvider,
+  model: string,
+  nowMs: number,
+  load: PoolLoad,
+  extra: number,
+  weeklyOnly = false,
+): number {
+  const sessions = load.sessions.get(provider.instanceId) ?? 0;
+  const windows = liveWindows(provider, model, nowMs).filter(
+    (window) => !weeklyOnly || kindOf(window) === "weekly",
+  );
+  const overruns = windows.map((window) => {
+    const kind = kindOf(window);
+    if (window.resetsAt === undefined) return window.usedPercent - ROOM_PERCENT[kind];
+    const hours = (Date.parse(window.resetsAt) - nowMs) / 3_600_000;
+    const measured = load.history.perHour(provider.instanceId, window, nowMs);
+    const floor = SESSION_BURN_PER_HOUR[kind];
+    const burn = Math.max(measured ?? 0, sessions * floor);
+    const perSession = Math.max(
+      floor,
+      measured !== undefined && sessions > 0 ? measured / sessions : 0,
+    );
+    return window.usedPercent + (burn + extra * perSession) * hours - ROOM_PERCENT[kind];
+  });
+  return Math.max(-Infinity, ...overruns);
+}
+
+function servable(provider: ServerProvider | undefined): provider is ServerProvider {
+  return (
+    provider !== undefined &&
+    provider.enabled &&
+    provider.status === "ready" &&
+    provider.auth.status === "authenticated"
+  );
+}
+
+/**
+ * The pooled account a new thread on `model` should run on: of those that stay within their room at every
+ * reset with it added, the one whose weekly window resets soonest, so budget about to expire goes first.
+ * With `fallback`, when none has room, the one that overruns least; otherwise undefined.
  */
 export function pickPoolAccount(input: {
   readonly pool: ReadonlyArray<ProviderInstanceId>;
   readonly providers: ReadonlyArray<ServerProvider>;
-  readonly activeThreads: ReadonlyArray<{ readonly providerInstanceId: ProviderInstanceId }>;
+  readonly load: PoolLoad;
   readonly model: string;
   readonly nowMs: number;
   readonly exclude?: ProviderInstanceId;
+  readonly fallback?: boolean;
 }): ProviderInstanceId | undefined {
-  const withRoom = input.pool.flatMap((instanceId) => {
+  const candidates = input.pool.flatMap((instanceId) => {
     const provider = input.providers.find((candidate) => candidate.instanceId === instanceId);
-    if (
-      instanceId === input.exclude ||
-      provider === undefined ||
-      !provider.enabled ||
-      provider.status !== "ready" ||
-      provider.auth.status !== "authenticated"
-    )
-      return [];
-    const windows = liveWindows(provider, input.model, input.nowMs);
-    const active = input.activeThreads.filter(
-      (thread) => thread.providerInstanceId === instanceId,
-    ).length;
-    const full = windows.some((window) =>
-      window.kind === "session"
-        ? window.usedPercent + active * SESSION_RESERVE_PER_ACTIVE_THREAD >= SESSION_ROOM_PERCENT
-        : window.usedPercent + active * WEEKLY_RESERVE_PER_ACTIVE_THREAD >= WEEKLY_ROOM_PERCENT,
-    );
-    if (full) return [];
-    const weeklyReset = windows.find((window) => window.id === "seven_day")?.resetsAt;
+    if (instanceId === input.exclude || !servable(provider)) return [];
+    const weeklyReset = liveWindows(provider, input.model, input.nowMs).find(
+      (window) => window.id === "seven_day",
+    )?.resetsAt;
     return [
-      { instanceId, resetMs: weeklyReset === undefined ? Infinity : Date.parse(weeklyReset) },
+      {
+        instanceId,
+        overrun: poolAccountOverrun(provider, input.model, input.nowMs, input.load, 1),
+        resetMs: weeklyReset === undefined ? Infinity : Date.parse(weeklyReset),
+      },
     ];
   });
-  // Stable sort keeps pool order among accounts with no known reset.
-  return withRoom.toSorted((left, right) => left.resetMs - right.resetMs)[0]?.instanceId;
+  // Stable sorts keep pool order among accounts with no known reset.
+  const withRoom = candidates.filter((candidate) => candidate.overrun <= 0);
+  if (withRoom.length > 0)
+    return withRoom.toSorted((left, right) => left.resetMs - right.resetMs)[0]!.instanceId;
+  return input.fallback === true
+    ? candidates.toSorted((left, right) => left.overrun - right.overrun)[0]?.instanceId
+    : undefined;
 }

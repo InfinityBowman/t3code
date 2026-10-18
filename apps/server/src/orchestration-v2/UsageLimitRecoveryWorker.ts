@@ -14,6 +14,9 @@ import {
   ACCOUNT_MOVE_MIN_WAIT_MS,
   pickPoolAccount,
   poolAccountBlockedUntil,
+  poolAccountOverrun,
+  poolLoad,
+  usageHistory,
 } from "../provider/accountPool.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
@@ -24,9 +27,18 @@ import * as ThreadManagement from "./ThreadManagementService.ts";
 
 // Usage is probed only on demand, so an idle pooled account is re-probed this often to route on.
 const POOL_USAGE_MAX_AGE_MS = 10 * 60 * 1000;
+// After a balancing move, the account's measured burn needs time to show it before another.
+const REBALANCE_COOLDOWN_MS = 60 * 60 * 1000;
+
+const MOVE_TEXT = {
+  limit:
+    "The previous account reached its usage limit, so this thread moved to another account. Continue where you left off.",
+  balance:
+    "This thread moved to another account, since the previous one would run out before its reset. Continue where you left off.",
+} as const;
 
 /**
- * Moves a thread off a blocked account in place. The switch ends a turn the old account still
+ * Moves a thread to another account in place. The switch ends a turn the old account still
  * holds and hands the thread's context to the new one; the queued message starts the next turn
  * there as soon as no turn is active.
  */
@@ -35,6 +47,7 @@ export function accountMoveCommands(input: {
   readonly modelSelection: ModelSelection;
   readonly targetInstanceId: ProviderInstanceId;
   readonly runId: RunId;
+  readonly reason?: keyof typeof MOVE_TEXT;
 }): readonly [OrchestrationV2Command, OrchestrationV2Command] {
   const identity = `${input.threadId}:${input.runId}:${input.targetInstanceId}`;
   return [
@@ -49,7 +62,7 @@ export function accountMoveCommands(input: {
       commandId: CommandId.make(`account-move:${identity}`),
       messageId: MessageId.make(`account-move:${identity}`),
       threadId: input.threadId,
-      text: "The previous account reached its usage limit, so this thread moved to another account. Continue where you left off.",
+      text: MOVE_TEXT[input.reason ?? "limit"],
       attachments: [],
       dispatchMode: { type: "queue_after_active" },
       createdBy: "user",
@@ -128,6 +141,7 @@ export const makeSweep = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const registry = yield* ProviderRegistry.ProviderRegistry;
   const probedAt = new Map<ProviderInstanceId, number>();
+  const rebalancedAt = new Map<ProviderInstanceId, number>();
 
   const dispatchAll = (threadId: ThreadId, commands: ReadonlyArray<OrchestrationV2Command>) =>
     Effect.forEach(commands, (command) => threads.dispatch(command), { discard: true }).pipe(
@@ -149,7 +163,9 @@ export const makeSweep = Effect.gen(function* () {
       probedAt.set(instanceId, nowMs);
       yield* registry.refreshInstance(instanceId);
     }
-    return yield* registry.getProviders;
+    const providers = yield* registry.getProviders;
+    usageHistory.record(providers);
+    return providers;
   });
 
   return Effect.fn("UsageLimitRecoveryWorker.sweep")(function* () {
@@ -160,20 +176,14 @@ export const makeSweep = Effect.gen(function* () {
     const moved = new Set<ThreadId>();
     if (pool.length > 0) {
       const providers = yield* poolSnapshots(pool, nowMs);
+      const load = poolLoad(pool, preferences.providerInstances, nowMs);
       const active = yield* projections.getActiveThreads({
         since: DateTime.subtract(now, { hours: 1 }),
       });
       // A limit that lifts soon is waited out; a long one moves the thread to an account with room.
       const target = (current: ProviderInstanceId, model: string, resetMs: number) =>
         pool.includes(current) && resetMs - nowMs > ACCOUNT_MOVE_MIN_WAIT_MS
-          ? pickPoolAccount({
-              pool,
-              providers,
-              activeThreads: active,
-              model,
-              nowMs,
-              exclude: current,
-            })
+          ? pickPoolAccount({ pool, providers, load, model, nowMs, exclude: current })
           : undefined;
       // Claude Code can hold a turn at a limit rather than fail it, so a running thread on a
       // used-up account is stuck until the reset.
@@ -222,6 +232,52 @@ export const makeSweep = Effect.gen(function* () {
             runId: thread.latestRunId,
           }),
         );
+        moved.add(thread.id);
+      }
+      // An account whose weekly use would run past its room before the reset hands its newest running
+      // thread to one with room for it, one at a time, so the threads with the most context stay put.
+      // A blocked account is the limit moves' to handle, and a session window lifts within hours.
+      for (const instanceId of pool) {
+        if (nowMs - (rebalancedAt.get(instanceId) ?? 0) < REBALANCE_COOLDOWN_MS) continue;
+        const thread = active
+          .filter(
+            (candidate) =>
+              candidate.providerInstanceId === instanceId &&
+              candidate.runningRunId !== null &&
+              !moved.has(candidate.id),
+          )
+          .toSorted(
+            (left, right) =>
+              DateTime.toEpochMillis(right.createdAt) - DateTime.toEpochMillis(left.createdAt),
+          )[0];
+        const provider = providers.find((candidate) => candidate.instanceId === instanceId);
+        if (
+          thread === undefined ||
+          provider === undefined ||
+          poolAccountBlockedUntil(provider, thread.modelSelection.model, nowMs) !== undefined ||
+          poolAccountOverrun(provider, thread.modelSelection.model, nowMs, load, 0, true) <= 0
+        )
+          continue;
+        const targetInstanceId = pickPoolAccount({
+          pool,
+          providers,
+          load,
+          model: thread.modelSelection.model,
+          nowMs,
+          exclude: instanceId,
+        });
+        if (targetInstanceId === undefined) continue;
+        yield* dispatchAll(
+          thread.id,
+          accountMoveCommands({
+            threadId: thread.id,
+            modelSelection: thread.modelSelection,
+            targetInstanceId,
+            runId: thread.runningRunId!,
+            reason: "balance",
+          }),
+        );
+        rebalancedAt.set(instanceId, nowMs);
         moved.add(thread.id);
       }
     }

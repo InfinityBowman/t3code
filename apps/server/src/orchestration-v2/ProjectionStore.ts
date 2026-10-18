@@ -179,7 +179,7 @@ export type ProjectionLimitRecoveryCandidate = Pick<
 
 export type ProjectionActiveThread = Pick<
   OrchestrationV2ThreadShell,
-  "id" | "providerInstanceId" | "modelSelection"
+  "id" | "providerInstanceId" | "modelSelection" | "createdAt"
 > & { readonly runningRunId: RunId | null };
 
 export type ProjectionThreadPullRequests = Pick<
@@ -3909,6 +3909,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             id: thread.id,
             providerInstanceId: thread.providerInstanceId,
             modelSelection: thread.modelSelection,
+            createdAt: thread.createdAt,
             runningRunId: row.running_run_id === null ? null : RunId.make(row.running_run_id),
           });
         }
@@ -6771,6 +6772,7 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   id: thread.id,
                   providerInstanceId: thread.providerInstanceId,
                   modelSelection: thread.modelSelection,
+                  createdAt: thread.createdAt,
                   runningRunId: running?.id ?? null,
                 },
               ];
