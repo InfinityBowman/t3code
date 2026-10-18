@@ -5,16 +5,16 @@ import * as Effect from "effect/Effect";
 
 import * as Orchestrator from "./Orchestrator.ts";
 
-const WAKE_TEXT =
-  "T3 Code restarted, which ended this session's process. This message reopens it so its crons fire again; nothing to do unless one is due.";
+// A local command: Claude answers it without the model, so the session reopens, restoring its crons, and the
+// model has nothing to act on.
+const REOPEN_COMMAND = "/cost";
 
 // Restart continuations dispatch first; a thread one of them already resumed needs no wake.
 const WAKE_DELAY = Duration.minutes(1);
 
 /**
  * A Claude session's crons live in its CLI process, and resuming the session restores them. A server
- * restart ends every process, so each thread whose session had crons gets one message after startup
- * to open it again.
+ * restart ends every process, so after startup each thread whose session had crons is reopened.
  */
 export const wakeSessionCrons = (startedAt: DateTime.Utc) =>
   Effect.gen(function* () {
@@ -32,7 +32,7 @@ export const wakeSessionCrons = (startedAt: DateTime.Utc) =>
           commandId: CommandId.make(`command:session-cron-wake:${key}`),
           threadId: shell.id,
           messageId: MessageId.make(`message:session-cron-wake:${key}`),
-          text: WAKE_TEXT,
+          text: REOPEN_COMMAND,
           attachments: [],
           modelSelection: shell.modelSelection,
           dispatchMode: { type: "start_immediately" },
