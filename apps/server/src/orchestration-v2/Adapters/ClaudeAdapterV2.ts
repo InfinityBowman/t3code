@@ -6825,6 +6825,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   ...(nativeThreadId !== null && goalsByNativeThread.has(nativeThreadId)
                     ? { goal: goalsByNativeThread.get(nativeThreadId) ?? null }
                     : {}),
+                  ...(nativeThreadId !== null && sessionCronsByNativeThread.has(nativeThreadId)
+                    ? { sessionCrons: sessionCronsByNativeThread.get(nativeThreadId) ?? [] }
+                    : {}),
                   firstRunOrdinal:
                     input.context.input.providerThread.firstRunOrdinal ??
                     input.context.input.runOrdinal,

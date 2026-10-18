@@ -1,6 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 
+import { compileClaudeModelSelection } from "../claudeModelOptions.ts";
 import { hasValidClaudeManifestAdapters } from "./ClaudeModelManifest.ts";
 import { resolveProviderCatalog, type ModelManifestData } from "./ModelManifest.ts";
 import {
@@ -253,5 +254,17 @@ describe("Claude model catalog", () => {
       resolveClaudeModelsForVersion(catalog, "3.2.0").map((model) => model.slug),
       ["claude-synthetic-next", "claude-custom-tuned"],
     );
+  });
+});
+
+describe("explicit context suffix", () => {
+  it("reads the model's options without it and keeps it on the API id", () => {
+    const selection = {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-opus-5-5[1m]",
+    };
+    const compiled = compileClaudeModelSelection(selection);
+    assert.strictEqual(compiled.apiModelId, "claude-opus-5-5[1m]");
+    assert.strictEqual(compiled.effort, "high");
   });
 });

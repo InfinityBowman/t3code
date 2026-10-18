@@ -141,17 +141,26 @@ export function scopeClaudeModelCatalog(
   return { models: [...builtInModels, ...customCatalogModels] };
 }
 
+// "claude-opus-5-5[1m]" is Opus 5.5 with Claude Code's explicit 1M context: lookups read the model
+// without it, and the API id keeps it, since Claude Code sizes its context only from the suffix.
+const CONTEXT_SUFFIX = /\[[^\]]+\]$/;
+
 function resolveClaudeCatalogModel(
   catalog: ClaudeModelCatalog,
   slugOrAlias: string | null | undefined,
 ): ClaudeCatalogModel | undefined {
   const value = slugOrAlias?.trim();
   if (!value) return undefined;
-  return (
+  const found =
     catalog.models.find((entry) => entry.model.slug === value) ??
     catalog.models.find((entry) =>
       entry.model.aliases?.some((alias) => alias.toLowerCase() === value.toLowerCase()),
-    )
+    );
+  return (
+    found ??
+    (CONTEXT_SUFFIX.test(value)
+      ? resolveClaudeCatalogModel(catalog, value.replace(CONTEXT_SUFFIX, ""))
+      : undefined)
   );
 }
 
@@ -297,7 +306,9 @@ export function resolveClaudeCatalogApiModelId(
     );
     if (typeof value === "string" && suffixes[value]) return `${slug}${suffixes[value]}`;
   }
-  return slug;
+  return entry === undefined
+    ? slug
+    : `${slug}${CONTEXT_SUFFIX.exec(modelSelection.model.trim())?.[0] ?? ""}`;
 }
 
 export function resolveClaudeCatalogContextWindowTokens(
