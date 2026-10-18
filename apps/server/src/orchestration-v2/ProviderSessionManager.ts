@@ -762,7 +762,10 @@ export const layerWithOptions = (
             ]);
             for (const providerThread of projection.providerThreads) {
               const tasks = providerThread.pendingBackgroundTasks ?? [];
-              if (providerThread.providerSessionId !== providerSessionId || tasks.length === 0) {
+              if (
+                providerThread.providerSessionId !== providerSessionId ||
+                (tasks.length === 0 && (providerThread.sessionCrons ?? []).length === 0)
+              ) {
                 continue;
               }
               released.push({
@@ -807,7 +810,12 @@ export const layerWithOptions = (
                 );
                 const tasks = providerThread?.pendingBackgroundTasks ?? [];
                 const remaining = tasks.filter((task) => !taskIds.has(task.taskId));
-                if (providerThread === undefined || remaining.length === tasks.length) return;
+                if (
+                  providerThread === undefined ||
+                  (remaining.length === tasks.length &&
+                    (providerThread.sessionCrons ?? []).length === 0)
+                )
+                  return;
                 const now = yield* DateTime.now;
                 const { committed } = yield* eventSink.writeIfProviderThreadUnchanged({
                   expected: providerThread,
@@ -822,6 +830,8 @@ export const layerWithOptions = (
                       payload: {
                         ...providerThread,
                         pendingBackgroundTasks: remaining,
+                        // Its crons ended with the process too.
+                        sessionCrons: [],
                         updatedAt: now,
                       },
                     },
@@ -1124,6 +1134,17 @@ export const layerWithOptions = (
           // Capture runtime identity before yielding: a replacement session
           // can reuse the same providerSessionId while this fiber is parked.
           const probedRuntime = entry.runtime;
+          // A session's crons wake it however long they wait, so it stays open with no pin limit.
+          const hasSessionCrons =
+            probedRuntime.hasSessionCrons === undefined
+              ? false
+              : yield* probedRuntime.hasSessionCrons.pipe(
+                  Effect.catchCause(() => Effect.succeed(false)),
+                );
+          if (hasSessionCrons) {
+            yield* Effect.sleep(Duration.millis(idleTimeoutMs));
+            return yield* releaseIfStillIdle(input);
+          }
           const hasPendingWork =
             probedRuntime.hasPendingBackgroundWork === undefined
               ? false

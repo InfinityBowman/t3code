@@ -1634,6 +1634,11 @@ export function threadShellFromProjection(
       threadId: projection.thread.id,
       providerThreads: projection.providerThreads,
     }),
+    sessionCrons:
+      activeProviderThreadForShell(
+        projection.providerThreads,
+        projection.thread.activeProviderThreadId,
+      )?.sessionCrons ?? [],
     goal: activeProviderGoalForShell(
       projection.providerThreads,
       projection.thread.activeProviderThreadId,
@@ -1680,11 +1685,18 @@ function providerInstanceHistoryForShell(input: {
   return history;
 }
 
+function activeProviderThreadForShell(
+  providerThreads: ReadonlyArray<OrchestrationV2ThreadProjection["providerThreads"][number]>,
+  activeProviderThreadId: OrchestrationV2ThreadProjection["thread"]["activeProviderThreadId"],
+) {
+  return providerThreads.find((thread) => thread.id === activeProviderThreadId);
+}
+
 function activeProviderGoalForShell(
   providerThreads: ReadonlyArray<OrchestrationV2ThreadProjection["providerThreads"][number]>,
   activeProviderThreadId: OrchestrationV2ThreadProjection["thread"]["activeProviderThreadId"],
 ): OrchestrationV2ThreadShell["goal"] {
-  return providerThreads.find((thread) => thread.id === activeProviderThreadId)?.goal ?? null;
+  return activeProviderThreadForShell(providerThreads, activeProviderThreadId)?.goal ?? null;
 }
 
 function isInterruptibleRunForShell(run: OrchestrationV2ThreadProjection["runs"][number]): boolean {
@@ -1721,6 +1733,7 @@ type ShellThreadState = {
   readonly hasActionableProposedPlan: boolean;
   readonly pendingBackgroundTasks: OrchestrationV2ThreadShell["pendingBackgroundTasks"];
   readonly providerInstanceHistory: OrchestrationV2ThreadShell["providerInstanceHistory"];
+  readonly sessionCrons: OrchestrationV2ThreadShell["sessionCrons"];
   readonly goal: OrchestrationV2ThreadShell["goal"];
   readonly itemCount: number;
   readonly runlessItemCount: number;
@@ -1876,6 +1889,7 @@ function shellFromState(input: {
     hasActionableProposedPlan: input.state.hasActionableProposedPlan,
     pendingBackgroundTasks: input.state.pendingBackgroundTasks,
     providerInstanceHistory: input.state.providerInstanceHistory,
+    sessionCrons: input.state.sessionCrons,
     goal: input.state.goal,
     itemCount: input.state.itemCount,
     visibleItemCount: input.visibleItemCount,
@@ -6300,6 +6314,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             threadId: thread.id,
             providerThreads: providerThreadsByThreadId.get(thread.id) ?? [],
           }),
+          sessionCrons:
+            activeProviderThreadForShell(
+              providerThreadsByThreadId.get(thread.id) ?? [],
+              thread.activeProviderThreadId,
+            )?.sessionCrons ?? [],
           goal: activeProviderGoalForShell(
             providerThreadsByThreadId.get(thread.id) ?? [],
             thread.activeProviderThreadId,

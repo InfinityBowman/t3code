@@ -560,6 +560,8 @@ export interface ProviderAdapterV2SessionRuntime {
    */
   readonly subscribeEvents?: Effect.Effect<ProviderAdapterV2EventSubscription>;
   readonly hasPendingBackgroundWork?: Effect.Effect<boolean>;
+  /** True while a provider thread has crons of its own: they fire only while the process runs. */
+  readonly hasSessionCrons?: Effect.Effect<boolean>;
   /**
    * When present, RunExecutionService uses only this probe (never the
    * session-wide hasPendingBackgroundWork) so sibling native threads cannot pin

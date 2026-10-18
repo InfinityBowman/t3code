@@ -114,6 +114,7 @@ export interface EnvironmentThreadShell {
     NonNullable<OrchestrationV2ThreadShell["pendingBackgroundTasks"]>[number]
   >;
   readonly providerInstanceHistory: ReadonlyArray<ProviderInstanceId>;
+  readonly sessionCrons: NonNullable<OrchestrationV2ThreadShell["sessionCrons"]>;
   readonly goal: OrchestrationV2ProviderGoal | null;
   readonly itemCount: number;
   readonly visibleItemCount: number;
@@ -265,6 +266,7 @@ export function presentThreadShell(
     hasActionableProposedPlan: thread.hasActionableProposedPlan,
     pendingBackgroundTasks: thread.pendingBackgroundTasks ?? [],
     providerInstanceHistory: thread.providerInstanceHistory ?? [],
+    sessionCrons: thread.sessionCrons ?? [],
     goal: thread.goal ?? null,
     itemCount: thread.itemCount,
     visibleItemCount: thread.visibleItemCount,

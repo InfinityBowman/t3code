@@ -37,6 +37,31 @@ export interface ClaudeModelCatalog {
   readonly models: ReadonlyArray<ClaudeCatalogModel>;
 }
 
+// Every Claude session here thinks at High unless its thread picks another level; the upstream
+// manifest defaults some models to Medium.
+function defaultEffortHigh(model: ServerProviderModel): ServerProviderModel {
+  const descriptors = model.capabilities?.optionDescriptors;
+  if (descriptors === undefined) return model;
+  return {
+    ...model,
+    capabilities: {
+      ...model.capabilities,
+      optionDescriptors: descriptors.map((descriptor) =>
+        descriptor.id !== "effort" ||
+        descriptor.type !== "select" ||
+        !descriptor.options.some((option) => option.id === "high")
+          ? descriptor
+          : {
+              ...descriptor,
+              options: descriptor.options.map(({ isDefault: _isDefault, ...option }) =>
+                option.id === "high" ? { ...option, isDefault: true } : option,
+              ),
+            },
+      ),
+    },
+  };
+}
+
 function tryResolveClaudeModelCatalog(
   resolved: ModelCatalog.ProviderCatalog | undefined,
 ): ClaudeModelCatalog | null {
@@ -48,7 +73,7 @@ function tryResolveClaudeModelCatalog(
     const adapter = decodeClaudeModelAdapter(entry.adapter ?? {});
     if (Option.isNone(profile) || Option.isNone(adapter)) return null;
     models.push({
-      model: ModelCatalog.catalogServerModel(resolved, entry),
+      model: defaultEffortHigh(ModelCatalog.catalogServerModel(resolved, entry)),
       runtime: profile.value.claudeCode ?? {},
       compatibility: adapter.value.claudeCode ?? {},
     });

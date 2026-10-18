@@ -874,6 +874,20 @@ export const OrchestrationV2ProviderGoal = Schema.Struct({
 });
 export type OrchestrationV2ProviderGoal = typeof OrchestrationV2ProviderGoal.Type;
 
+/**
+ * A cron the provider session scheduled for itself (Claude's CronCreate, ScheduleWakeup or /loop),
+ * as the session last reported it. It fires only while the session's process runs.
+ */
+export const OrchestrationV2SessionCron = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  /** Five-field cron expression in the machine's local time. */
+  schedule: TrimmedNonEmptyString,
+  /** False for a one-shot whose expression names a single fire time. */
+  recurring: Schema.Boolean,
+  prompt: Schema.String,
+});
+export type OrchestrationV2SessionCron = typeof OrchestrationV2SessionCron.Type;
+
 export const OrchestrationV2ProviderThread = Schema.Struct({
   id: ProviderThreadId,
   driver: ProviderDriverKind,
@@ -895,6 +909,9 @@ export const OrchestrationV2ProviderThread = Schema.Struct({
     }),
   ),
   pendingBackgroundTasks: Schema.optional(Schema.Array(OrchestrationV2PendingBackgroundTask)).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  sessionCrons: Schema.optional(Schema.Array(OrchestrationV2SessionCron)).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   contextUsage: Schema.optional(Schema.NullOr(ThreadTokenUsageSnapshot)).pipe(
@@ -1848,6 +1865,10 @@ export const OrchestrationV2ThreadShell = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   providerInstanceHistory: Schema.optional(Schema.Array(ProviderInstanceId)).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
+  /** The active provider thread's own crons. */
+  sessionCrons: Schema.optional(Schema.Array(OrchestrationV2SessionCron)).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   goal: Schema.optional(Schema.NullOr(OrchestrationV2ProviderGoal)),

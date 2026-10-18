@@ -22,6 +22,7 @@ import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 import { normalizeClaudeTurnTokenUsage } from "../../provider/ClaudeTurnTokenUsage.ts";
 import {
   type CanUseTool,
+  type HookCallbackMatcher,
   forkSession as forkClaudeSession,
   type EffortLevel,
   type ForkSessionOptions,
@@ -71,6 +72,7 @@ import {
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
   OrchestrationV2ProviderGoal,
+  type OrchestrationV2SessionCron,
   type OrchestrationV2PlanArtifact,
   type OrchestrationV2PlanStep,
   type OrchestrationV2PendingBackgroundTask,
@@ -1240,6 +1242,29 @@ function claudeLiveSelectionFlagSettings(
   };
 }
 
+// Claude reports a session's crons only to its Stop hooks; the list lives in the CLI process.
+function sessionCronsHook(
+  onSessionCrons: (crons: ReadonlyArray<OrchestrationV2SessionCron>) => void,
+): HookCallbackMatcher {
+  return {
+    hooks: [
+      async (input) => {
+        if (input.hook_event_name === "Stop" && input.session_crons !== undefined) {
+          onSessionCrons(
+            input.session_crons.map(({ id, schedule, recurring, prompt }) => ({
+              id,
+              schedule,
+              recurring,
+              prompt,
+            })),
+          );
+        }
+        return {};
+      },
+    ],
+  };
+}
+
 export function makeClaudeQueryOptions(input: {
   readonly modelSelection: ModelSelection;
   readonly nativeThreadId: string;
@@ -1258,6 +1283,8 @@ export function makeClaudeQueryOptions(input: {
   readonly disallowedTools?: ReadonlyArray<string>;
   readonly permissionMode?: PermissionMode;
   readonly canUseTool?: CanUseTool;
+  /** Called with the session's own crons each time it stops. */
+  readonly onSessionCrons?: (crons: ReadonlyArray<OrchestrationV2SessionCron>) => void;
   readonly onUserDialog?: ClaudeQueryOptions["onUserDialog"];
   readonly supportedDialogKinds?: ClaudeQueryOptions["supportedDialogKinds"];
   readonly allowDangerouslySkipPermissions?: boolean;
@@ -1329,6 +1356,9 @@ export function makeClaudeQueryOptions(input: {
     ...(input.allowedTools === undefined ? {} : { allowedTools: [...input.allowedTools] }),
     ...(input.disallowedTools === undefined ? {} : { disallowedTools: [...input.disallowedTools] }),
     ...(input.canUseTool === undefined ? {} : { canUseTool: input.canUseTool }),
+    ...(input.onSessionCrons === undefined
+      ? {}
+      : { hooks: { Stop: [sessionCronsHook(input.onSessionCrons)] } }),
     ...(input.allowDangerouslySkipPermissions === true
       ? { allowDangerouslySkipPermissions: true }
       : {}),
@@ -4020,6 +4050,10 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           new Map<string, OrchestrationV2ProviderThread>(),
         );
         const goalsByNativeThread = new Map<string, OrchestrationV2ProviderGoal | null>();
+        const sessionCronsByNativeThread = new Map<
+          string,
+          ReadonlyArray<OrchestrationV2SessionCron>
+        >();
         const goalCheckedTurns = new Set<string>();
         // Subagent registry that survives turn settle: a background subagent
         // (Agent with run_in_background) can complete after the root turn
@@ -4448,6 +4482,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(goalsByNativeThread.has(input.nativeThreadId)
               ? { goal: goalsByNativeThread.get(input.nativeThreadId) ?? null }
               : {}),
+            ...(sessionCronsByNativeThread.has(input.nativeThreadId)
+              ? { sessionCrons: sessionCronsByNativeThread.get(input.nativeThreadId) ?? [] }
+              : {}),
             updatedAt: now,
           };
           yield* rememberProviderThread(providerThread);
@@ -4480,6 +4517,39 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           );
           if (providerThread === undefined) return;
           const updated = { ...providerThread, goal: next, updatedAt: yield* DateTime.now };
+          yield* rememberProviderThread(updated);
+          yield* emitProviderEvent({
+            type: "provider_thread.updated",
+            driver: CLAUDE_PROVIDER,
+            providerThread: updated,
+          });
+        });
+
+        const recordSessionCrons = Effect.fnUntraced(function* (
+          nativeThreadId: string,
+          crons: ReadonlyArray<OrchestrationV2SessionCron>,
+        ) {
+          sessionCronsByNativeThread.set(nativeThreadId, crons);
+          const providerThread = (yield* Ref.get(lastProviderThreadByNativeThread)).get(
+            nativeThreadId,
+          );
+          const previous = providerThread?.sessionCrons ?? [];
+          if (
+            providerThread === undefined ||
+            (previous.length === crons.length &&
+              previous.every(
+                (cron, index) =>
+                  cron.id === crons[index]?.id &&
+                  cron.schedule === crons[index]?.schedule &&
+                  cron.prompt === crons[index]?.prompt,
+              ))
+          )
+            return;
+          const updated = {
+            ...providerThread,
+            sessionCrons: crons,
+            updatedAt: yield* DateTime.now,
+          };
           yield* rememberProviderThread(updated);
           yield* emitProviderEvent({
             type: "provider_thread.updated",
@@ -9173,6 +9243,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   allowDangerouslySkipPermissions: queryPolicy.allowDangerouslySkipPermissions,
                 }),
             canUseTool,
+            onSessionCrons: (crons) =>
+              void runPromise(recordSessionCrons(nativeThreadId, crons).pipe(Effect.ignore)),
             onUserDialog,
             supportedDialogKinds: ["resume_return"],
             ...(appendSystemPromptFileText === undefined ? {} : { appendSystemPromptFileText }),
@@ -9907,6 +9979,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             resolveClaudeCatalogContextWindowTokens(BUNDLED_CLAUDE_MODEL_CATALOG, selection),
           events: Stream.fromEffectRepeat(Queue.take(events)),
           backgroundTasksEndWithProcess: true,
+          hasSessionCrons: Effect.sync(() =>
+            Array.from(sessionCronsByNativeThread.values()).some((crons) => crons.length > 0),
+          ),
           hasPendingBackgroundWork: Effect.gen(function* () {
             for (const roster of (yield* Ref.get(pendingBackgroundTasksByNativeThread)).values()) {
               if (roster.size > 0) {
