@@ -120,6 +120,11 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import {
+  claudeKeeperSocket,
+  spawnThroughClaudeKeeper,
+  takeClaudeKeeperReattach,
+} from "../../provider/ClaudeKeeper.ts";
 import { resolveClaudeSdkExecutablePath } from "../../provider/Drivers/ClaudeExecutable.ts";
 import {
   planClaudeSkillDispatch,
@@ -920,10 +925,19 @@ export const layerQueryRunner: Layer.Layer<
                 pathToClaudeCodeExecutable: launch.command,
                 executableArgs: [...launch.args, ...(queryOptions.executableArgs ?? [])],
               };
-        // Windows has no process groups, so there the SDK spawns the CLI itself.
+        // Windows has no process groups, so there the SDK spawns the CLI itself. With a keeper, the session's
+        // process lives there instead, and a server restart leaves it running.
+        const keeperSocket = platform === "win32" ? undefined : claudeKeeperSocket();
         const spawnClaudeCodeProcess =
           options.spawnClaudeCodeProcess ??
-          (platform === "win32" ? undefined : spawnClaudeProcessGroup);
+          (platform === "win32"
+            ? undefined
+            : keeperSocket === undefined
+              ? spawnClaudeProcessGroup
+              : spawnThroughClaudeKeeper(
+                  keeperSocket,
+                  queryOptions.resume ?? queryOptions.sessionId,
+                ));
         const queryRuntime = yield* Effect.uninterruptibleMask((restore) =>
           Effect.try({
             try: () =>
@@ -9281,9 +9295,22 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             updated.add(nativeThreadId);
             return updated;
           });
-          yield* resetBackgroundTaskStateForNativeThreadProcess(nativeThreadId, {
-            status: "active",
-          });
+          if (yield* Effect.promise(() => takeClaudeKeeperReattach(nativeThreadId))) {
+            // The keeper kept this session's process through a server restart, and with it the background work
+            // and crons its provider thread last listed.
+            yield* replacePendingBackgroundTasks(
+              nativeThreadId,
+              turnInput.providerThread.pendingBackgroundTasks ?? [],
+            );
+            sessionCronsByNativeThread.set(
+              nativeThreadId,
+              turnInput.providerThread.sessionCrons ?? [],
+            );
+          } else {
+            yield* resetBackgroundTaskStateForNativeThreadProcess(nativeThreadId, {
+              status: "active",
+            });
+          }
           const closed = yield* Deferred.make<void, never>();
           const context: ClaudeLiveQueryContext = {
             queryPolicy,

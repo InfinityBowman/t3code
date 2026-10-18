@@ -35,6 +35,8 @@ import * as LegacyV1ThreadImporter from "./orchestration-v2/legacy/LegacyV1Threa
 import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as ProviderRuntimeRecovery from "./orchestration-v2/ProviderRuntimeRecoveryService.ts";
 import * as ProviderSessionManager from "./orchestration-v2/ProviderSessionManager.ts";
+import * as ClaudeKeeperReattach from "./orchestration-v2/ClaudeKeeperReattach.ts";
+import { detachClaudeKeeperClients } from "./provider/ClaudeKeeper.ts";
 import * as ThreadLaunch from "./orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
@@ -481,6 +483,8 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
       if (workerFiber !== null) {
         yield* Fiber.interrupt(workerFiber).pipe(Effect.ignore);
       }
+      // Claude sessions held by the keeper outlive this server; the next one attaches to them.
+      yield* Effect.sync(detachClaudeKeeperClients);
       yield* providerRuntimeRecovery.prepareForShutdown.pipe(
         Effect.ensuring(providerSessions.shutdown),
       );
@@ -584,6 +588,13 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
     ).pipe(
       Effect.catch((cause) =>
         Effect.logWarning("Failed to load projects for automatic pull", { cause }),
+      ),
+      forkParked,
+    );
+
+    yield* ClaudeKeeperReattach.reattachClaudeKeeperSessions.pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Failed to reattach Claude sessions held by the keeper", { cause }),
       ),
       forkParked,
     );

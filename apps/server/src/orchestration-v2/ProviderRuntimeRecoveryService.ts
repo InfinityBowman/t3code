@@ -22,6 +22,7 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { claudeKeeperSessions, claudeKeeperSessionsAtStartup } from "../provider/ClaudeKeeper.ts";
 import { restartContinuationRun } from "./RestartContinuation.ts";
 import { isBufferedProviderNotification } from "./NotificationMailbox.ts";
 import {
@@ -201,8 +202,19 @@ export const make = Effect.gen(function* () {
       trigger: "startup" | "shutdown",
       continueAfterRestart: boolean,
       stoppedThisPass: ReadonlyMap<string, RecoverySession> = new Map(),
+      keptSessions: ReadonlySet<string> = new Set(),
     ) {
       const now = yield* DateTime.now;
+      // The keeper held these threads' Claude processes through the restart: their turns and background work go
+      // on, so nothing is noted as cut, nothing is continued, and their rosters stay.
+      const keptProviderThreadIds = new Set(
+        (projection.providerThreads ?? []).flatMap((providerThread) =>
+          providerThread.nativeThreadRef?.nativeId != null &&
+          keptSessions.has(providerThread.nativeThreadRef.nativeId)
+            ? [providerThread.id]
+            : [],
+        ),
+      );
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
         if (run.status === "waiting") {
@@ -271,7 +283,7 @@ export const make = Effect.gen(function* () {
         providerThreadId: ProviderThreadId | null | undefined,
         work: OrchestrationV2RestartCancelledBackgroundWork,
       ) => {
-        if (providerThreadId == null) return;
+        if (providerThreadId == null || keptProviderThreadIds.has(providerThreadId)) return;
         const existing = cancelledBackgroundWork.get(providerThreadId);
         if (existing === undefined) cancelledBackgroundWork.set(providerThreadId, [work]);
         else existing.push(work);
@@ -554,12 +566,13 @@ export const make = Effect.gen(function* () {
         })),
       );
       for (const providerThread of projection.providerThreads ?? []) {
+        const kept = keptProviderThreadIds.has(providerThread.id);
         const needsIdle = providerThread.status === "active";
-        const needsRosterClear = providerThreadHasPendingBackgroundTasks(providerThread);
+        const needsRosterClear = !kept && providerThreadHasPendingBackgroundTasks(providerThread);
         if (!needsIdle && !needsRosterClear) {
           continue;
         }
-        if (providerThread.ownerNodeId === null) {
+        if (providerThread.ownerNodeId === null && !kept) {
           for (const task of providerThread.pendingBackgroundTasks ?? []) {
             // A subagent already recorded covers the shells it started.
             if (
@@ -582,7 +595,7 @@ export const make = Effect.gen(function* () {
           payload: {
             ...providerThread,
             status: needsIdle ? "idle" : providerThread.status,
-            pendingBackgroundTasks: [],
+            pendingBackgroundTasks: kept ? (providerThread.pendingBackgroundTasks ?? []) : [],
             updatedAt: now,
           },
         });
@@ -621,13 +634,18 @@ export const make = Effect.gen(function* () {
           },
         });
       }
-      const continuationRun =
+      const restartedRun =
         continueAfterRestart && trigger === "startup"
           ? restartContinuationRun(
               { ...projection, providerSessions: sessionsLiveAtStart(projection, stoppedThisPass) },
               now,
             )
           : undefined;
+      const continuationRun =
+        restartedRun?.providerThreadId != null &&
+        keptProviderThreadIds.has(restartedRun.providerThreadId)
+          ? undefined
+          : restartedRun;
       const effects: Array<EffectOutbox.PendingOrchestrationEffectV2> = continuationRun
         ? [
             {
@@ -707,6 +725,9 @@ export const make = Effect.gen(function* () {
           (cause) => new ProviderRuntimeRecoveryError({ operation: "read-projections", cause }),
         ),
       );
+    const keptSessions = yield* Effect.promise(
+      trigger === "startup" ? claudeKeeperSessionsAtStartup : claudeKeeperSessions,
+    );
     let terminalizedRuns = 0;
     let stoppedSessions = 0;
     let closedRequests = 0;
@@ -727,7 +748,13 @@ export const make = Effect.gen(function* () {
         continueAfterRestart !== null &&
         resolveProjectSettings(continueAfterRestart, projection.thread.projectId).settings
           .continueThreadsAfterServerUpdate;
-      const result = yield* reconcileProjection(projection, trigger, enabled, stoppedThisPass);
+      const result = yield* reconcileProjection(
+        projection,
+        trigger,
+        enabled,
+        stoppedThisPass,
+        keptSessions,
+      );
       for (const session of projection.providerSessions) {
         if (session.status !== "stopped" && session.status !== "error") {
           stoppedThisPass.set(session.id, session);
@@ -756,6 +783,7 @@ export const make = Effect.gen(function* () {
     const enabled = yield* settings.getSettings.pipe(Effect.orElseSucceed(() => null));
     if (!enabled) return;
     const threadIds = yield* projections.getRecoveryThreadIds("runtime");
+    const keptSessions = yield* Effect.promise(claudeKeeperSessions);
     for (const threadId of threadIds) {
       yield* Effect.gen(function* () {
         const projection = yield* projections.getRuntimeRecoveryProjection(threadId);
@@ -766,6 +794,10 @@ export const make = Effect.gen(function* () {
           return;
         const run = restartContinuationRun(projection, yield* DateTime.now);
         if (!run) return;
+        const nativeId = projection.providerThreads.find(
+          (providerThread) => providerThread.id === run.providerThreadId,
+        )?.nativeThreadRef?.nativeId;
+        if (nativeId != null && keptSessions.has(nativeId)) return;
         const commandId = CommandId.make(`command:restart-prepare:${run.id}`);
         yield* eventSink.writeWithEffects({
           commandId,
