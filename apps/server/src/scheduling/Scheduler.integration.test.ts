@@ -20,6 +20,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as UsageLimitRecoveryWorker from "../orchestration-v2/UsageLimitRecoveryWorker.ts";
@@ -125,7 +126,11 @@ it.effect.each(["on time", "after restart"])(
       const layerWorkers = Layer.mergeAll(
         ScheduledTasks.layer,
         UsageLimitRecoveryWorker.layer,
-      ).pipe(Layer.provide(layerDependencies), Layer.provide(Scheduler.layer));
+      ).pipe(
+        Layer.provide(layerDependencies),
+        Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+        Layer.provide(Scheduler.layer),
+      );
       yield* Effect.gen(function* () {
         const tasks = yield* ScheduledTasks.ScheduledTaskService;
         const { task } = yield* tasks.upsert({

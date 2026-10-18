@@ -162,6 +162,8 @@ export type ProjectionRecoveryKind =
 export type ProjectionLimitRecoveryCandidate = Pick<
   OrchestrationV2ThreadShell,
   | "id"
+  | "providerInstanceId"
+  | "modelSelection"
   | "status"
   | "lastErrorClass"
   | "latestRunId"
@@ -174,6 +176,11 @@ export type ProjectionLimitRecoveryCandidate = Pick<
   | "limitRecovery"
   | "snoozedUntil"
 >;
+
+export type ProjectionActiveThread = Pick<
+  OrchestrationV2ThreadShell,
+  "id" | "providerInstanceId" | "modelSelection"
+> & { readonly runningRunId: RunId | null };
 
 export type ProjectionThreadPullRequests = Pick<
   OrchestrationV2AppThread,
@@ -445,6 +452,10 @@ export interface ProjectionStoreV2Shape {
     readonly autoResume: boolean;
     readonly snooze: boolean;
   }) => Effect.Effect<ReadonlyArray<ProjectionLimitRecoveryCandidate>, ProjectionStoreV2Error>;
+  /** Live threads with a run in progress or one that ended since `since`. */
+  readonly getActiveThreads: (options: {
+    readonly since: DateTime.Utc;
+  }) => Effect.Effect<ReadonlyArray<ProjectionActiveThread>, ProjectionStoreV2Error>;
   readonly getSettlementCandidates: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionSettlementCandidate>, ProjectionStoreV2Error>;
@@ -3848,6 +3859,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           if (summary.lastErrorClass !== "usage_limit") continue;
           candidates.push({
             id: thread.id,
+            providerInstanceId: thread.providerInstanceId,
+            modelSelection: thread.modelSelection,
             status: "failed",
             lastErrorClass: summary.lastErrorClass,
             usageLimitResetAt: summary.usageLimitResetAt,
@@ -3863,6 +3876,43 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           });
         }
         return candidates;
+      },
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
+
+    const getActiveThreads = Effect.fn("ProjectionStore.getActiveThreads")(
+      function* (options: Parameters<ProjectionStoreV2Shape["getActiveThreads"]>[0]) {
+        const rows = yield* sql<{
+          readonly payload_json: string;
+          readonly running_run_id: string | null;
+        }>`
+          SELECT t.payload_json, (
+            SELECT r.run_id FROM orchestration_v2_projection_runs r
+            WHERE r.thread_id = t.thread_id AND r.status IN ('starting', 'running')
+            ORDER BY r.ordinal DESC LIMIT 1
+          ) AS running_run_id
+          FROM orchestration_v2_projection_threads t
+          WHERE t.deleted_at IS NULL AND t.archived_at IS NULL
+            AND EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_runs r
+              WHERE r.thread_id = t.thread_id
+                AND (
+                  r.status IN ('starting', 'running', 'waiting')
+                  OR julianday(r.completed_at) >= julianday(${DateTime.formatIso(options.since)})
+                )
+            )
+        `;
+        const threads: Array<ProjectionActiveThread> = [];
+        for (const row of rows) {
+          const thread = yield* decodeThreadPayload(row.payload_json);
+          threads.push({
+            id: thread.id,
+            providerInstanceId: thread.providerInstanceId,
+            modelSelection: thread.modelSelection,
+            runningRunId: row.running_run_id === null ? null : RunId.make(row.running_run_id),
+          });
+        }
+        return threads;
       },
       Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
     );
@@ -6490,6 +6540,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getPlan,
       getProviderControlContext,
       getLimitRecoveryCandidates,
+      getActiveThreads,
       getRecoveryThreadIds,
       getUnreadableThreadIds,
       getThreadSnapshot,
@@ -6696,6 +6747,34 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                 );
               })
               .toSorted((left, right) => left.id.localeCompare(right.id)),
+          ),
+        ),
+      getActiveThreads: (options) =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...state.projections.values()].flatMap(({ thread, runs }) => {
+              if (thread.deletedAt !== null || thread.archivedAt !== null) return [];
+              const sinceMs = DateTime.toEpochMillis(options.since);
+              const active = runs.some(
+                (run) =>
+                  run.status === "starting" ||
+                  run.status === "running" ||
+                  run.status === "waiting" ||
+                  (run.completedAt != null && DateTime.toEpochMillis(run.completedAt) >= sinceMs),
+              );
+              if (!active) return [];
+              const running = runs
+                .filter((run) => run.status === "starting" || run.status === "running")
+                .toSorted((left, right) => right.ordinal - left.ordinal)[0];
+              return [
+                {
+                  id: thread.id,
+                  providerInstanceId: thread.providerInstanceId,
+                  modelSelection: thread.modelSelection,
+                  runningRunId: running?.id ?? null,
+                },
+              ];
+            }),
           ),
         ),
       getRecoveryThreadIds: Effect.fn("ProjectionStore.getRecoveryThreadIds")(function* (kind) {

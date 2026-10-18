@@ -21,6 +21,7 @@ import {
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -41,10 +42,12 @@ import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
+import { pickPoolAccount } from "../provider/accountPool.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import * as CommandReceiptStore from "./CommandReceiptStore.ts";
+import * as ProjectionStore from "./ProjectionStore.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as Orchestrator from "./Orchestrator.ts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
@@ -209,7 +212,38 @@ const make = Effect.gen(function* () {
   const ids = yield* IdAllocator.IdAllocatorV2;
   const threads = yield* ThreadManagement.ThreadManagementService;
   const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
   const preparationScope = yield* Scope.make("sequential");
+
+  // Pooled accounts are interchangeable: a new thread starts on the one with room, and a
+  // retried launch keeps the account its accepted create already chose.
+  const poolSelection = (selection: ModelSelection, existingThreadId: ThreadId | undefined) =>
+    Effect.gen(function* () {
+      const { accountPool } = yield* serverSettings.getSettings;
+      if (!accountPool.includes(selection.instanceId)) return selection;
+      if (existingThreadId !== undefined) {
+        const shell = yield* threads.getThreadShell(existingThreadId);
+        return shell?.modelSelection ?? selection;
+      }
+      const now = yield* DateTime.now;
+      const instanceId = pickPoolAccount({
+        pool: accountPool,
+        providers: yield* providerRegistry.getProviders,
+        activeThreads: yield* projections.getActiveThreads({
+          since: DateTime.subtract(now, { hours: 1 }),
+        }),
+        model: selection.model,
+        nowMs: DateTime.toEpochMillis(now),
+      });
+      return instanceId === undefined ? selection : { ...selection, instanceId };
+    }).pipe(
+      // Routing never blocks a launch: on any failure the thread starts where it was asked to.
+      Effect.catchCause((cause) =>
+        Effect.logWarning("thread-launch.account-pool.failed", { cause }).pipe(
+          Effect.as(selection),
+        ),
+      ),
+    );
   const scheduledLaunches = yield* Ref.make<ReadonlySet<CommandId>>(new Set());
   yield* Effect.addFinalizer(() => Scope.close(preparationScope, Exit.void));
 
@@ -860,6 +894,15 @@ const make = Effect.gen(function* () {
           (yield* ids.allocate
             .thread({ projectId: input.projectId })
             .pipe(Effect.mapError(mapError(input, "create-thread"))));
+        if (input.reuseExistingThread !== true) {
+          input = {
+            ...input,
+            modelSelection: yield* poolSelection(
+              input.modelSelection,
+              Option.isSome(launchReceipt) ? candidateThreadId : undefined,
+            ),
+          };
+        }
 
         if (reusableLaunchReceipt !== undefined) {
           const shell = yield* threads
