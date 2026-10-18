@@ -211,9 +211,9 @@ const make = Effect.gen(function* () {
       }
       return payload.value.importedTranscripts ?? [];
     });
-    const outcomes = scanner.recentThreads(project.workspaceRoot, completedSources);
     const wanted =
       input.providerSessionIds === undefined ? undefined : new Set(input.providerSessionIds);
+    const outcomes = scanner.recentThreads(project.workspaceRoot, completedSources, wanted);
     const importedThreadIds = new Set<ThreadId>();
     let importedCount = 0;
     let skippedCount = 0;

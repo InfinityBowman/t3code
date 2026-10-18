@@ -159,6 +159,8 @@ export class AgentSessionScanner extends Context.Service<
     readonly recentThreads: (
       workspaceRoot: string,
       completedSources?: ReadonlyArray<AgentSessionImportSource>,
+      /** Only the transcripts named for these session ids, so others spend none of the import's budget. */
+      onlySessionIds?: ReadonlySet<string>,
     ) => Stream.Stream<AgentSessionRecentThread, AgentSessionScanError>;
   }
 >()("t3/project/AgentSessionScanner") {}
@@ -1316,6 +1318,7 @@ export const make = Effect.gen(function* () {
   const prepareRecentThreads = Effect.fn("AgentSessionScanner.prepareRecentThreads")(function* (
     workspaceRoot: string,
     completedSources: ReadonlyArray<AgentSessionImportSource>,
+    onlySessionIds: ReadonlySet<string> | undefined,
   ) {
     const root = path.resolve(expandHomePath(workspaceRoot, homeDir));
     const realRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
@@ -1339,6 +1342,8 @@ export const make = Effect.gen(function* () {
 
       for (const transcript of candidate.transcripts) {
         if (
+          (onlySessionIds !== undefined &&
+            !onlySessionIds.has(path.basename(transcript.filePath, ".jsonl"))) ||
           transcript.mtimeMs === null ||
           transcript.mtimeMs < cutoffMs ||
           transcript.mtimeMs > nowMs
@@ -1469,7 +1474,8 @@ export const make = Effect.gen(function* () {
   const recentThreads: AgentSessionScanner["Service"]["recentThreads"] = (
     workspaceRoot,
     completedSources = [],
-  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources));
+    onlySessionIds,
+  ) => Stream.unwrap(prepareRecentThreads(workspaceRoot, completedSources, onlySessionIds));
 
   return AgentSessionScanner.of({ scan, recentThreads });
 });
