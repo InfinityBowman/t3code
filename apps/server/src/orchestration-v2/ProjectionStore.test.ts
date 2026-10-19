@@ -6749,6 +6749,28 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           contextHandoffId: null,
         },
       });
+      // The user's message started the run, so its completion notifies.
+      yield* store.apply({
+        id: EventId.make("event:watched-pull-request:user-message"),
+        type: "message.updated",
+        threadId: threadId,
+        runId: runId,
+        occurredAt: at,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: MessageId.make("message:watched-pull-request"),
+          threadId: threadId,
+          runId: runId,
+          nodeId: null,
+          role: "user",
+          text: "Go",
+          attachments: [],
+          streaming: false,
+          createdAt: at,
+          updatedAt: at,
+        },
+      });
       const link = {
         host: "github.com",
         repository: "pingdotgg/t3code",
@@ -6888,6 +6910,28 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
           completedAt,
           checkpointId: null,
           contextHandoffId: null,
+        },
+      });
+      // The user's message started the run, so its completion notifies.
+      yield* store.apply({
+        id: EventId.make("event:held-completion:user-message"),
+        type: "message.updated",
+        threadId: threadId,
+        runId: runId,
+        occurredAt: completedAt,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: MessageId.make("message:held-completion"),
+          threadId: threadId,
+          runId: runId,
+          nodeId: null,
+          role: "user",
+          text: "Go",
+          attachments: [],
+          streaming: false,
+          createdAt: completedAt,
+          updatedAt: completedAt,
         },
       });
       yield* store.apply({

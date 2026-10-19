@@ -29,6 +29,8 @@ describe("projectThreadAwarenessV2", () => {
         | "pendingRuntimeRequest"
         | "lineage"
         | "settledOverride"
+        | "latestRunRequestedAt"
+        | "latestUserAuthoredMessageAt"
       >
     > = {},
   ) => ({
@@ -106,6 +108,25 @@ describe("projectThreadAwarenessV2", () => {
         thread: v2Thread({ status: "completed", pendingBackgroundTasks: tasks }),
       }),
     ).toMatchObject({ phase });
+  });
+
+  it.each([
+    ["the user started", 0, "completed"],
+    ["the user steered", 5_000, "completed"],
+    ["another agent started", -5_000, undefined],
+  ] as const)("reports a finished run %s as %s", (_case, userOffsetMs, phase) => {
+    const requested = DateTime.toEpochMillis(updatedAt);
+    expect(
+      projectThreadAwarenessV2({
+        environmentId: "env-1" as EnvironmentId,
+        project,
+        thread: v2Thread({
+          status: "completed",
+          latestRunRequestedAt: updatedAt,
+          latestUserAuthoredMessageAt: DateTime.makeUnsafe(requested + userOffsetMs),
+        }),
+      })?.phase,
+    ).toBe(phase);
   });
 
   it("prioritizes V2 user-input requests", () => {

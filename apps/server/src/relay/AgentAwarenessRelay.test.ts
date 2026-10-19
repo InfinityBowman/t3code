@@ -1020,6 +1020,28 @@ describe("AgentAwarenessRelay", () => {
         occurredAt: now,
         payload: run,
       });
+      // The user's message started the run, so its completion notifies.
+      yield* store.apply({
+        id: EventId.make("event:held-item:user-message"),
+        type: "message.updated",
+        threadId: THREAD_ID,
+        runId: runId,
+        occurredAt: now,
+        payload: {
+          createdBy: "user",
+          creationSource: "web",
+          id: MessageId.make("message:held-item"),
+          threadId: THREAD_ID,
+          runId: runId,
+          nodeId: null,
+          role: "user",
+          text: "Go",
+          attachments: [],
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
       yield* deliver(
         itemEvent("event:held-item:tool", item("item:tool", { ...background, status: "running" })),
       );

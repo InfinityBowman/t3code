@@ -44,6 +44,8 @@ export interface ProjectThreadAwarenessV2Input {
     OrchestrationV2ThreadShell,
     | "activityRunStatus"
     | "id"
+    | "latestRunRequestedAt"
+    | "latestUserAuthoredMessageAt"
     | "lineage"
     | "modelSelection"
     | "pendingBackgroundTasks"
@@ -118,9 +120,10 @@ function resolveThreadAwarenessPhaseV2(
     case "waiting":
       return "running";
     case "completed":
-      return backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])
-        ? "running"
-        : "completed";
+      if (backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])) return "running";
+      // A turn the user didn't start (another agent's message, a cron, a background job finishing) ends
+      // quietly: the thread leaves the activity list instead of sending a Done notification.
+      return startedByUser(thread) ? "completed" : null;
     case "failed":
       return "failed";
     case "idle":
@@ -130,6 +133,19 @@ function resolveThreadAwarenessPhaseV2(
     case "rolled_back":
       return null;
   }
+}
+
+// A run and the message that requests it share one timestamp, so a user message at or after the latest
+// run's request either started that run or steered it.
+function startedByUser(thread: ProjectThreadAwarenessV2Input["thread"]): boolean {
+  if (thread.latestRunRequestedAt == null || thread.latestUserAuthoredMessageAt === undefined) {
+    return true;
+  }
+  return (
+    thread.latestUserAuthoredMessageAt !== null &&
+    DateTime.toEpochMillis(thread.latestUserAuthoredMessageAt) >=
+      DateTime.toEpochMillis(thread.latestRunRequestedAt)
+  );
 }
 
 function headlineForPhase(phase: AgentAwarenessPhase): string {
