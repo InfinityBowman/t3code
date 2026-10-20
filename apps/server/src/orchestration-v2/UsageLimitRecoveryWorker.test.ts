@@ -19,6 +19,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ThreadManagement from "./ThreadManagementService.ts";
 import * as UsageLimitRecoveryWorker from "./UsageLimitRecoveryWorker.ts";
@@ -99,6 +100,7 @@ const sweepOnce = (input: {
           ]),
         getLimitRecoveryCandidates: () => Effect.succeed(input.failed ? [candidate] : []),
       }),
+      Layer.mock(Orchestrator.OrchestratorV2)({}),
       Layer.mock(ThreadManagement.ThreadManagementService)({
         dispatch: (command) =>
           Effect.sync(() => {
@@ -254,6 +256,7 @@ const sweepBusy = (
           ),
         getLimitRecoveryCandidates: () => Effect.succeed([]),
       }),
+      Layer.mock(Orchestrator.OrchestratorV2)({}),
       Layer.mock(ThreadManagement.ThreadManagementService)({
         dispatch: (command) =>
           Effect.sync(() => {
