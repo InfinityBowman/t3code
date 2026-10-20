@@ -106,8 +106,10 @@ export function spawnThroughClaudeKeeper(socketPath: string, key: string) {
       exitCode = signalCode === null ? 0 : null;
       events.emit("exit", exitCode, signalCode);
     });
+    // A session the server ends stops at once: ending its stdin alone lets one busy with subagents or
+    // background jobs work on unseen, beside the session that replaced it.
     const end = () => {
-      if (!detaching) sendControl(socketPath, { op: "close", key });
+      if (!detaching) sendControl(socketPath, { op: "kill", key, signal: "SIGTERM" });
     };
     // Its own stream, so the SDK ending stdin closes the session through the keeper instead of half-closing the
     // connection, which a crashing server does too.

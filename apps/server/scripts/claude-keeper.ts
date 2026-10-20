@@ -10,7 +10,6 @@
  * Each connection starts with one JSON line:
  * - {op:"attach", key, command, args, cwd, env}: joins the live process for `key`, or starts it from the rest.
  *   The connection then carries the process's stdin and stdout; the process's exit closes it.
- * - {op:"close", key}: ends the process's stdin, as a client closing the session on purpose does.
  * - {op:"kill", key, signal}: signals the process's group.
  * - {op:"list"}: answers one JSON line, [{key, pid}], for the live processes.
  * A connection that drops without one of these leaves its process running.
@@ -109,12 +108,8 @@ function control(socket: net.Socket, header: Record<string, unknown>) {
     );
     return;
   }
-  if (entry !== undefined && header.op === "close") {
-    // A later attach for this key starts a new process rather than joining the one that is ending.
-    kept.delete(entry.key);
-    entry.child.stdin!.end();
-  }
   if (entry !== undefined && header.op === "kill") {
+    // A later attach for this key starts a new process rather than joining the one that is ending.
     kept.delete(entry.key);
     signalGroup(entry, (header.signal as NodeJS.Signals | undefined) ?? "SIGTERM");
   }

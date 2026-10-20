@@ -25,7 +25,7 @@ const readLine = (stream: Readable) =>
     stream.on("data", onData);
   });
 
-it("keeps a session's process through a dropped connection and ends it when closed", async () => {
+it("keeps a session's process through a dropped connection and stops it when closed", async () => {
   const socket = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "keeper-")), "k.sock");
   const keeper = spawn(process.execPath, [KEEPER, socket], {
     stdio: ["ignore", "pipe", "inherit"],
@@ -34,9 +34,10 @@ it("keeps a session's process through a dropped connection and ends it when clos
     await new Promise<void>((resolve) =>
       keeper.stdout.on("data", (chunk) => String(chunk).includes("listening") && resolve()),
     );
+    // Like a session busy with subagents, it keeps working after its stdin ends.
     const options = {
-      command: "cat",
-      args: [],
+      command: "sh",
+      args: ["-c", "cat; sleep 30"],
       env: process.env,
       cwd: os.tmpdir(),
       signal: new AbortController().signal,
