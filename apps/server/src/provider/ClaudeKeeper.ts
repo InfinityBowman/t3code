@@ -29,6 +29,11 @@ function sendControl(socketPath: string, message: Record<string, unknown>): void
   socket.end(JSON.stringify(message) + "\n");
 }
 
+/** Ends the keeper's process for one session, and the process group it leads. */
+export function stopClaudeKeeperSession(socketPath: string, key: string): void {
+  sendControl(socketPath, { op: "kill", key, signal: "SIGTERM" });
+}
+
 /** The session ids the keeper holds a live process for. */
 export function listClaudeKeeperSessions(socketPath: string): Promise<ReadonlySet<string>> {
   return new Promise((resolve) => {

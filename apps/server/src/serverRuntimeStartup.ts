@@ -598,6 +598,7 @@ const make = Effect.fn("serverRuntimeStartup.make")(function* (options?: Startup
       ),
       forkParked,
     );
+    yield* ClaudeKeeperReattach.reapClaudeKeeperOrphans.pipe(forkParked);
 
     const importPendingTranscripts = legacyV1ThreadImporter.importPendingTranscripts.pipe(
       Effect.tap((summary) =>

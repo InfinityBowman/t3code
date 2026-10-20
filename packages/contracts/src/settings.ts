@@ -1171,6 +1171,11 @@ export const ServerSettings = Schema.Struct({
   accountPool: Schema.Array(ProviderInstanceId).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
+  /**
+   * Threads that never share a pooled account, so one account's limit never stops them all: moves never
+   * put one beside another, and one found beside another moves while it's idle.
+   */
+  accountPoolApart: Schema.Array(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   sidebarAutoSettleKeepPullRequests: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
@@ -1488,6 +1493,7 @@ export const ServerSettingsPatch = Schema.Struct({
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   accountPool: Schema.optionalKey(Schema.Array(ProviderInstanceId)),
+  accountPoolApart: Schema.optionalKey(Schema.Array(ThreadId)),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({

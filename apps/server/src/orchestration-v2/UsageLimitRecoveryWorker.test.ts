@@ -172,3 +172,125 @@ it.effect("moves a running thread off an account whose weekly use would pass its
     );
   }),
 );
+
+// B holds six running threads and sits at 70% of a five-hour window that resets in three hours.
+const busyHome = fs.mkdtempSync(path.join(os.tmpdir(), "pool-busy-"));
+const busyInstances = Object.fromEntries(
+  [a, b].map((instanceId) => [
+    instanceId,
+    {
+      driver: ProviderDriverKind.make("claudeAgent"),
+      config: { homePath: path.join(busyHome, instanceId) },
+    },
+  ]),
+);
+fs.mkdirSync(path.join(busyHome, b, "projects", "repo"), { recursive: true });
+for (let index = 0; index < 6; index++) {
+  const transcript = path.join(busyHome, b, "projects", "repo", `${index}.jsonl`);
+  fs.writeFileSync(transcript, "{}\n");
+  fs.utimesSync(transcript, (now - 60_000) / 1000, (now - 60_000) / 1000);
+}
+const withWindows = (instanceId: ProviderInstanceId, windows: ReadonlyArray<unknown>) =>
+  ({
+    instanceId,
+    enabled: true,
+    status: "ready",
+    auth: { status: "authenticated" },
+    usageLimits: { checkedAt: "2026-10-18T14:59:00.000Z", windows },
+  }) as unknown as ServerProvider;
+const busyB = withWindows(b, [
+  {
+    id: "five_hour",
+    kind: "session",
+    label: "Session",
+    usedPercent: 70,
+    resetsAt: "2026-10-18T18:00:00.000Z",
+  },
+  {
+    id: "seven_day",
+    kind: "weekly",
+    label: "Weekly",
+    usedPercent: 20,
+    resetsAt: "2026-10-21T23:00:00.000Z",
+  },
+]);
+const quietA = withWindows(a, [
+  { id: "five_hour", kind: "session", label: "Session", usedPercent: 0, windowDurationMins: 300 },
+  {
+    id: "seven_day",
+    kind: "weekly",
+    label: "Weekly",
+    usedPercent: 0,
+    resetsAt: "2026-10-25T19:00:00.000Z",
+  },
+]);
+
+const sweepBusy = (
+  threads: ReadonlyArray<{ id: string; running: boolean; ageHours: number }>,
+  apart: ReadonlyArray<string>,
+) =>
+  Effect.gen(function* () {
+    yield* TestClock.setTime(now);
+    const dispatched: Array<OrchestrationV2Command> = [];
+    const layer = Layer.mergeAll(
+      ServerSettings.layerTest({
+        accountPool: [a, b],
+        accountPoolApart: apart.map((id) => ThreadId.make(id)),
+        providerInstances: busyInstances,
+      }),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({
+        getProviders: Effect.succeed([quietA, busyB]),
+      }),
+      Layer.mock(ProjectionStore.ProjectionStoreV2)({
+        getActiveThreads: () =>
+          Effect.succeed(
+            threads.map((thread) => ({
+              id: ThreadId.make(thread.id),
+              providerInstanceId: b,
+              modelSelection: { instanceId: b, model: "claude-opus-5-5" },
+              createdAt: DateTime.makeUnsafe(now - thread.ageHours * 3_600_000),
+              runningRunId: thread.running ? RunId.make(`run:${thread.id}`) : null,
+            })),
+          ),
+        getLimitRecoveryCandidates: () => Effect.succeed([]),
+      }),
+      Layer.mock(ThreadManagement.ThreadManagementService)({
+        dispatch: (command) =>
+          Effect.sync(() => {
+            dispatched.push(command as OrchestrationV2Command);
+            return { sequence: dispatched.length, storedEvents: [] };
+          }),
+      }),
+    );
+    const sweep = yield* UsageLimitRecoveryWorker.makeSweep.pipe(Effect.provide(layer));
+    yield* sweep().pipe(Effect.provide(layer));
+    return dispatched.flatMap((command) =>
+      command.type === "provider.switch" ? [command.threadId] : [],
+    );
+  });
+
+it.effect("moves an account's newest running threads off it until its five-hour window fits", () =>
+  Effect.gen(function* () {
+    // 70% + 6 sessions × 2 points an hour × 3 hours passes the 90% room; three fewer sessions fit.
+    const moved = yield* sweepBusy(
+      [1, 2, 3, 4, 5, 6].map((ageHours) => ({ id: `thread:${ageHours}`, running: true, ageHours })),
+      [],
+    );
+    assert.deepEqual(moved, ["thread:1", "thread:2", "thread:3"]);
+  }),
+);
+
+it.effect("moves an idle thread kept apart off the account it shares, never a running one", () =>
+  Effect.gen(function* () {
+    const moved = yield* sweepBusy(
+      [
+        { id: "thread:ltm", running: false, ageHours: 9 },
+        { id: "thread:infra", running: true, ageHours: 8 },
+        { id: "thread:worker", running: true, ageHours: 1 },
+      ],
+      ["thread:ltm", "thread:infra"],
+    );
+    // B still runs past its room, so the worker leaves too; the running infra lead stays put.
+    assert.deepEqual(moved, ["thread:ltm", "thread:worker"]);
+  }),
+);

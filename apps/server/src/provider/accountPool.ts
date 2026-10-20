@@ -11,9 +11,11 @@ import type {
 
 // An account has room while its projected use at each window's reset stays at or under these.
 const ROOM_PERCENT = { session: 90, weekly: 95 } as const;
-// Burn per active session (points an hour), a floor under the measured rate and its stand-in until an hour
-// of readings exists. On Oct 18, account A spent about 1.5 weekly points an hour across nine sessions.
-const SESSION_BURN_PER_HOUR = { session: 2.5, weekly: 0.2 } as const;
+// Burn per active session (points an hour), a floor under the measured rate and its stand-in until 45 minutes
+// of readings exist. On Oct 19, account B spent about 20 five-hour points an hour across some 13 sessions, and
+// about 0.6 weekly points an hour across some 10; a busy Oct 18 on A ran 1.5 across nine. A weekly floor near
+// the busy rate would fill a freshly reset account after three sessions, a week out from its reset.
+const SESSION_BURN_PER_HOUR = { session: 2, weekly: 0.05 } as const;
 const BURN_WINDOW_MS = 3 * 60 * 60 * 1000;
 const MIN_BURN_SPAN_MS = 45 * 60 * 1000;
 // A session counts as active while its transcript was written this recently.
@@ -33,13 +35,15 @@ function bindsModel(window: ServerProviderUsageWindow, model: string): boolean {
   return window.id === "seven_day" || scope === undefined || model.includes(scope);
 }
 
-// A window whose reset has passed has started over, whatever the snapshot last said.
+// A window whose reset has passed has started over, whatever the snapshot last said: empty, and not yet opened.
 function liveWindows(provider: ServerProvider, model: string, nowMs: number) {
-  return (provider.usageLimits?.windows ?? []).filter(
-    (window) =>
-      bindsModel(window, model) &&
-      (window.resetsAt === undefined || Date.parse(window.resetsAt) > nowMs),
-  );
+  return (provider.usageLimits?.windows ?? [])
+    .filter((window) => bindsModel(window, model))
+    .map((window) =>
+      window.resetsAt !== undefined && Date.parse(window.resetsAt) <= nowMs
+        ? { ...window, usedPercent: 0, resetsAt: undefined }
+        : window,
+    );
 }
 
 /** When the account can serve this model again, if a window is used up; otherwise undefined. */
@@ -76,6 +80,10 @@ export function makeUsageHistory() {
           );
         }
       }
+    },
+    /** Restarts an account's measurement once moves change its load, so the old rate isn't projected. */
+    forget(instanceId: ProviderInstanceId) {
+      for (const key of samples.keys()) if (key.startsWith(`${instanceId}\0`)) samples.delete(key);
     },
     perHour(instanceId: ProviderInstanceId, window: ServerProviderUsageWindow, nowMs: number) {
       const series = (samples.get(key(instanceId, window)) ?? []).filter(
@@ -154,9 +162,10 @@ export function poolLoad(
 }
 
 /**
- * How far past its room this account ends at each window's reset, with `extra` more sessions: the worst
- * window's projected use minus its room, so a value over zero means it runs past it. Burn is the measured
- * rate, never under its sessions' floor; each extra session adds an average session's share.
+ * How far past its room this account ends at each window's reset, with `extra` more sessions (fewer when
+ * negative): the worst window's projected use minus its room, so a value over zero means it runs past it.
+ * Burn is the measured rate, never under its sessions' floor; each extra session adds an average session's
+ * share. A window not yet opened opens with the next request and runs its full length.
  */
 export function poolAccountOverrun(
   provider: ServerProvider,
@@ -164,16 +173,14 @@ export function poolAccountOverrun(
   nowMs: number,
   load: PoolLoad,
   extra: number,
-  weeklyOnly = false,
 ): number {
   const sessions = load.sessions.get(provider.instanceId) ?? 0;
-  const windows = liveWindows(provider, model, nowMs).filter(
-    (window) => !weeklyOnly || kindOf(window) === "weekly",
-  );
-  const overruns = windows.map((window) => {
+  const overruns = liveWindows(provider, model, nowMs).map((window) => {
     const kind = kindOf(window);
-    if (window.resetsAt === undefined) return window.usedPercent - ROOM_PERCENT[kind];
-    const hours = (Date.parse(window.resetsAt) - nowMs) / 3_600_000;
+    const hours =
+      window.resetsAt !== undefined
+        ? (Date.parse(window.resetsAt) - nowMs) / 3_600_000
+        : (window.windowDurationMins ?? 0) / 60;
     const measured = load.history.perHour(provider.instanceId, window, nowMs);
     const floor = SESSION_BURN_PER_HOUR[kind];
     const burn = Math.max(measured ?? 0, sessions * floor);
@@ -181,7 +188,7 @@ export function poolAccountOverrun(
       floor,
       measured !== undefined && sessions > 0 ? measured / sessions : 0,
     );
-    return window.usedPercent + (burn + extra * perSession) * hours - ROOM_PERCENT[kind];
+    return window.usedPercent + Math.max(0, burn + extra * perSession) * hours - ROOM_PERCENT[kind];
   });
   return Math.max(-Infinity, ...overruns);
 }
@@ -198,7 +205,8 @@ function servable(provider: ServerProvider | undefined): provider is ServerProvi
 /**
  * The pooled account a new thread on `model` should run on: of those that stay within their room at every
  * reset with it added, the one whose weekly window resets soonest, so budget about to expire goes first.
- * With `fallback`, when none has room, the one that overruns least; otherwise undefined.
+ * `added` counts sessions already moved onto an account this sweep. With `fallback`, when none has room,
+ * the one that overruns least; otherwise undefined.
  */
 export function pickPoolAccount(input: {
   readonly pool: ReadonlyArray<ProviderInstanceId>;
@@ -206,19 +214,26 @@ export function pickPoolAccount(input: {
   readonly load: PoolLoad;
   readonly model: string;
   readonly nowMs: number;
-  readonly exclude?: ProviderInstanceId;
+  readonly exclude?: ReadonlyArray<ProviderInstanceId>;
+  readonly added?: ReadonlyMap<ProviderInstanceId, number>;
   readonly fallback?: boolean;
 }): ProviderInstanceId | undefined {
   const candidates = input.pool.flatMap((instanceId) => {
     const provider = input.providers.find((candidate) => candidate.instanceId === instanceId);
-    if (instanceId === input.exclude || !servable(provider)) return [];
+    if (input.exclude?.includes(instanceId) || !servable(provider)) return [];
     const weeklyReset = liveWindows(provider, input.model, input.nowMs).find(
       (window) => window.id === "seven_day",
     )?.resetsAt;
     return [
       {
         instanceId,
-        overrun: poolAccountOverrun(provider, input.model, input.nowMs, input.load, 1),
+        overrun: poolAccountOverrun(
+          provider,
+          input.model,
+          input.nowMs,
+          input.load,
+          1 + (input.added?.get(instanceId) ?? 0),
+        ),
         resetMs: weeklyReset === undefined ? Infinity : Date.parse(weeklyReset),
       },
     ];

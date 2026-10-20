@@ -70,10 +70,10 @@ describe("pickPoolAccount", () => {
   });
 
   it("counts every session on an account against the use left before its reset", () => {
-    // 80% plus 28 hours at 0.2 points a session an hour: one session and the new thread fit under
-    // 95%, two do not.
-    expect(pick([soonA, laterB], { sessionsOnA: 1 })).toBe(a);
-    expect(pick([soonA, laterB], { sessionsOnA: 2 })).toBe(b);
+    // 80% plus 28 hours at 0.05 points a session an hour: nine sessions and the new thread fit under
+    // 95%, ten do not.
+    expect(pick([soonA, laterB], { sessionsOnA: 9 })).toBe(a);
+    expect(pick([soonA, laterB], { sessionsOnA: 10 })).toBe(b);
   });
 
   it("projects an account's measured burn to its reset", () => {
@@ -102,7 +102,30 @@ describe("pickPoolAccount", () => {
 
   it("treats a window whose reset has passed as started over", () => {
     const renewed = account(a, [weekly(100, "2026-10-18T14:00:00.000Z")]);
-    expect(pick([renewed, laterB], { exclude: b })).toBe(a);
+    expect(pick([renewed, laterB], { exclude: [b] })).toBe(a);
+  });
+
+  it("projects a busy account's unopened five-hour window over its whole length", () => {
+    // B's week resets first, but its nine sessions would use its next five hours past their room.
+    const unopened = {
+      id: "five_hour",
+      kind: "session",
+      label: "Session",
+      usedPercent: 0,
+      windowDurationMins: 300,
+    } as const;
+    const busyB = account(b, [unopened, weekly(20, "2026-10-19T23:00:00.000Z")]);
+    const quietA = account(a, [unopened, weekly(0, "2026-10-25T19:00:00.000Z")]);
+    const load = (sessionsOnB: number) => ({
+      sessions: new Map([[b, sessionsOnB]]),
+      history: makeUsageHistory(),
+    });
+    expect(pickPoolAccount({ pool, providers: [quietA, busyB], load: load(9), model, nowMs })).toBe(
+      a,
+    );
+    expect(pickPoolAccount({ pool, providers: [quietA, busyB], load: load(3), model, nowMs })).toBe(
+      b,
+    );
   });
 
   it("finds no account without room, unless asked for the one that overruns least", () => {
