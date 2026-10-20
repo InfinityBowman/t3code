@@ -4983,7 +4983,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ]);
       projection = yield* getProjectionWithPendingEvents(command.threadId, events);
     }
-    const modelSelection = command.modelSelection ?? projection.thread.modelSelection;
+    const requestedSelection = command.modelSelection ?? projection.thread.modelSelection;
+    const threadInstanceId = projection.thread.modelSelection.instanceId;
+    const { accountPool } = yield* serverSettings.getSettings.pipe(Effect.orDie);
+    // The published phone app keeps an account pick in its draft and sends it with every later message,
+    // so after the pool moves a thread its next phone message would move it back. Our web app clears a
+    // pick once sent, so its account changes are the user's.
+    const modelSelection =
+      command.creationSource === "mobile" &&
+      requestedSelection.instanceId !== threadInstanceId &&
+      accountPool.includes(requestedSelection.instanceId) &&
+      accountPool.includes(threadInstanceId)
+        ? { ...requestedSelection, instanceId: threadInstanceId }
+        : requestedSelection;
     let dispatchMode = resolveMessageDispatchIntent(
       projection,
       command.dispatchMode,
