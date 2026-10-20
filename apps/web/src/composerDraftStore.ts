@@ -3948,6 +3948,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
             if (!current) {
               return state;
             }
+            // A model or account pick goes with the sent message, which makes it the thread's own; kept in
+            // the draft, it would pull every later message back to it, even after the thread moves account.
             const nextDraft: ComposerThreadDraftState = {
               ...current,
               prompt: "",
@@ -3959,6 +3961,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               previewAnnotations: [],
               reviewComments: [],
               threadContexts: [],
+              modelSelectionByProvider: {},
+              activeProvider: null,
             };
             const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
             if (shouldRemoveDraft(nextDraft)) {

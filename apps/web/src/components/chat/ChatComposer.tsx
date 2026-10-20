@@ -2317,15 +2317,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     threadModelSelection: activeThreadModelSelection,
     projectModelSelection: activeProjectDefaultModelSelection,
     promptInjectionState: getComposerPromptInjectionState(prompt),
+    // The thread's own account before its last session's, which stays on the old account after a move.
     candidateInstanceIds: [
       composerDraft.activeProvider ?? null,
-      activeThread?.runtime?.providerInstanceId,
       activeThreadModelSelection?.instanceId,
+      activeThread?.runtime?.providerInstanceId,
       activeProjectDefaultModelSelection?.instanceId,
     ],
     lockedProvider,
     lockedInstanceId:
-      activeThread?.runtime?.providerInstanceId ?? activeThreadModelSelection?.instanceId,
+      activeThreadModelSelection?.instanceId ?? activeThread?.runtime?.providerInstanceId,
   });
   const noProviderAvailable =
     selectedProviderEntry === undefined && multipleModelSelections === null;

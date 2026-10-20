@@ -678,10 +678,18 @@ export function useThreadComposerState() {
       ...(followUpDispatchMode === null ? {} : { dispatchMode: followUpDispatchMode }),
       createdAt: metadata.createdAt,
     });
-    clearComposerDraftContent(threadKey, { deferAttachmentCleanup: true });
+    // A model or account pick goes with this message, which makes it the thread's own; kept in the draft,
+    // it would pull every later message back to it, even after the thread moves to another account.
+    clearComposerDraftContent(threadKey, {
+      deferAttachmentCleanup: true,
+      clearModelSelection: true,
+    });
     enqueuePromise.then(
       () => scheduleUnusedComposerAttachmentCleanup(attachments),
       (error: unknown) => {
+        if (draft.modelSelection !== undefined) {
+          updateComposerDraftSettings(threadKey, { modelSelection: draft.modelSelection });
+        }
         // Restore text via merge (idempotent) but attachments via the uncapped
         // append: the merge path slots existing attachments first and truncates
         // at the send limit, which would silently drop this message's images if

@@ -2473,14 +2473,15 @@ export default function ChatView(props: ChatViewProps) {
   const activeThreadModelInstanceId = activeThread?.modelSelection.instanceId;
   const { selectedProviderEntry, requestedDriverKind } = resolveComposerProviderSelection({
     entries: providerInstanceEntries,
+    // The thread's own account before its last session's, which stays on the old account after a move.
     candidateInstanceIds: [
       selectedProviderByThreadId,
-      activeRuntime?.providerInstanceId,
       activeThreadModelInstanceId,
+      activeRuntime?.providerInstanceId,
       activeProjectDefaultModelSelection?.instanceId,
     ],
     lockedProvider,
-    lockedInstanceId: activeRuntime?.providerInstanceId ?? activeThreadModelInstanceId,
+    lockedInstanceId: activeThreadModelInstanceId ?? activeRuntime?.providerInstanceId,
   });
   const selectedProvider = selectedProviderEntry?.driverKind ?? requestedDriverKind;
   const activeProviderInstanceId = selectedProviderEntry?.instanceId ?? null;
@@ -3095,7 +3096,7 @@ export default function ChatView(props: ChatViewProps) {
     driverKind: selectedProvider,
     instanceId: activeProviderInstanceId,
     lockedInstanceId: lockedProvider
-      ? (activeRuntime?.providerInstanceId ?? activeThread?.modelSelection.instanceId ?? null)
+      ? (activeThread?.modelSelection.instanceId ?? activeRuntime?.providerInstanceId ?? null)
       : null,
   });
   const [resumeCompactionPermanentlyDismissed, setResumeCompactionPermanentlyDismissed] =
