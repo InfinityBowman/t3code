@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - drives the keeper daemon over its socket, as the server does.
+// @effect-diagnostics globalDate:off - checks the wall-clock start the keeper client reports.
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import type * as net from "node:net";
@@ -48,7 +49,9 @@ it("keeps a session's process through a dropped connection and stops it when clo
     expect(await readLine(first.stdout)).toBe("one");
     // A server that dies sends nothing first.
     (first.stdout as net.Socket).destroy();
-    expect([...(await listClaudeKeeperSessions(socket))]).toEqual(["session"]);
+    const listed = await listClaudeKeeperSessions(socket);
+    expect([...listed.keys()]).toEqual(["session"]);
+    expect(Math.abs(Date.now() - listed.get("session")!)).toBeLessThan(10_000);
 
     const second = spawnThroughClaudeKeeper(socket, "session")(options);
     second.stdin.write("two\n");

@@ -78,7 +78,7 @@ export const reapClaudeKeeperOrphans = Effect.gen(function* () {
       )?.nativeThreadRef?.nativeId;
       if (nativeId != null) live.add(nativeId);
     }
-    const orphans = new Set([...kept].filter((key) => !live.has(key)));
+    const orphans = new Set([...kept.keys()].filter((key) => !live.has(key)));
     for (const key of orphans) {
       if (!suspects.has(key)) continue;
       stopClaudeKeeperSession(socket, key);

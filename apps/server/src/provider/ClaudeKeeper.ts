@@ -1,9 +1,11 @@
 // @effect-diagnostics nodeBuiltinImport:off - the SDK's custom spawn contract is Node streams and events.
+// @effect-diagnostics globalDate:off - dates keeper processes from ps, outside any Effect runtime.
 /**
  * Client for scripts/claude-keeper.ts, which holds Claude CLI processes so a server restart leaves them running.
  * Set T3CODE_CLAUDE_KEEPER_SOCKET to its socket to launch Claude through it; unset, Claude runs as the server's
  * own child.
  */
+import * as NodeChildProcess from "node:child_process";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as net from "node:net";
@@ -34,38 +36,69 @@ export function stopClaudeKeeperSession(socketPath: string, key: string): void {
   sendControl(socketPath, { op: "kill", key, signal: "SIGTERM" });
 }
 
-/** The session ids the keeper holds a live process for. */
-export function listClaudeKeeperSessions(socketPath: string): Promise<ReadonlySet<string>> {
+/**
+ * The session ids the keeper holds a live process for, each with when that process started (0 if unknown). A
+ * session can run in several processes over its life, and work from an earlier one did not survive it.
+ */
+export function listClaudeKeeperSessions(socketPath: string): Promise<ReadonlyMap<string, number>> {
   return new Promise((resolve) => {
     const socket = net.connect(socketPath);
     let answer = "";
     socket.setEncoding("utf8");
     socket.on("data", (chunk: string) => (answer += chunk));
-    socket.on("error", () => resolve(new Set()));
+    socket.on("error", () => resolve(new Map()));
     socket.on("close", () => {
+      let live: Array<{ readonly key: string; readonly pid: number }>;
       try {
-        const live = JSON.parse(answer) as Array<{ readonly key: string }>;
-        resolve(new Set(live.map((entry) => entry.key)));
+        live = JSON.parse(answer);
       } catch {
-        resolve(new Set());
+        resolve(new Map());
+        return;
       }
+      void processStarts(live.map((entry) => entry.pid)).then((starts) =>
+        resolve(new Map(live.map((entry) => [entry.key, starts.get(entry.pid) ?? 0]))),
+      );
     });
     socket.end(JSON.stringify({ op: "list" }) + "\n");
   });
 }
 
-/** The sessions the keeper holds now; none without a keeper. */
-export function claudeKeeperSessions(): Promise<ReadonlySet<string>> {
-  const socket = claudeKeeperSocket();
-  return socket === undefined ? Promise.resolve(new Set()) : listClaudeKeeperSessions(socket);
+// The keeper reports pids only; ps's elapsed time, [[dd-]hh:]mm:ss, dates them on macOS and Linux alike.
+function processStarts(pids: ReadonlyArray<number>): Promise<ReadonlyMap<number, number>> {
+  if (pids.length === 0) return Promise.resolve(new Map());
+  return new Promise((resolve) => {
+    NodeChildProcess.execFile(
+      "ps",
+      ["-o", "pid=,etime=", "-p", pids.join(",")],
+      (error, stdout) => {
+        const now = Date.now();
+        const starts = new Map<number, number>();
+        for (const line of error === null ? stdout.split("\n") : []) {
+          const match = /^\s*(\d+)\s+(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)\s*$/.exec(line);
+          if (match === null) continue;
+          const [, pid, days = "0", hours = "0", minutes, seconds] = match;
+          const elapsed =
+            ((Number(days) * 24 + Number(hours)) * 60 + Number(minutes)) * 60 + Number(seconds);
+          starts.set(Number(pid), now - elapsed * 1000);
+        }
+        resolve(starts);
+      },
+    );
+  });
 }
 
-let sessionsAtStartup: Promise<ReadonlySet<string>> | undefined;
+/** The sessions the keeper holds now; none without a keeper. */
+export function claudeKeeperSessions(): Promise<ReadonlyMap<string, number>> {
+  const socket = claudeKeeperSocket();
+  return socket === undefined ? Promise.resolve(new Map()) : listClaudeKeeperSessions(socket);
+}
+
+let sessionsAtStartup: Promise<ReadonlyMap<string, number>> | undefined;
 /**
  * The sessions the keeper held when this server started, read once before the server opens any: their
  * processes, turns, background work and crons carried over from the previous server.
  */
-export function claudeKeeperSessionsAtStartup(): Promise<ReadonlySet<string>> {
+export function claudeKeeperSessionsAtStartup(): Promise<ReadonlyMap<string, number>> {
   sessionsAtStartup ??= claudeKeeperSessions();
   return sessionsAtStartup;
 }

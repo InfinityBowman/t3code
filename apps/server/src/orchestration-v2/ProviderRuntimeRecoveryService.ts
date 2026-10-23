@@ -169,6 +169,23 @@ function latestStartedRun(
   );
 }
 
+// ps dates a process to the whole second, so it can read up to a second late.
+const PROCESS_START_GRAIN_MS = 1_000;
+
+/** When the keeper's process for each provider thread's native session started. */
+function keptProcessStarts(
+  providerThreads: ReadonlyArray<OrchestrationV2ThreadProjection["providerThreads"][number]>,
+  keptSessions: ReadonlyMap<string, number>,
+): ReadonlyMap<ProviderThreadId, number> {
+  const starts = new Map<ProviderThreadId, number>();
+  for (const providerThread of providerThreads) {
+    const nativeId = providerThread.nativeThreadRef?.nativeId;
+    const since = nativeId == null ? undefined : keptSessions.get(nativeId);
+    if (since !== undefined) starts.set(providerThread.id, since);
+  }
+  return starts;
+}
+
 export const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const projections = yield* ProjectionStore.ProjectionStoreV2;
@@ -202,19 +219,71 @@ export const make = Effect.gen(function* () {
       trigger: "startup" | "shutdown",
       continueAfterRestart: boolean,
       stoppedThisPass: ReadonlyMap<string, RecoverySession> = new Map(),
-      keptSessions: ReadonlySet<string> = new Set(),
+      keptSessions: ReadonlyMap<string, number> = new Map(),
     ) {
       const now = yield* DateTime.now;
       // The keeper held these threads' Claude processes through the restart: their turns and background work go
       // on, so nothing is noted as cut, nothing is continued, and their rosters stay.
-      const keptProviderThreadIds = new Set(
-        (projection.providerThreads ?? []).flatMap((providerThread) =>
-          providerThread.nativeThreadRef?.nativeId != null &&
-          keptSessions.has(providerThread.nativeThreadRef.nativeId)
-            ? [providerThread.id]
-            : [],
-        ),
-      );
+      const keptSince = keptProcessStarts(projection.providerThreads ?? [], keptSessions);
+      const keptProviderThreadIds = new Set(keptSince.keys());
+      // A native subagent's thread has no provider thread of its own: its work runs in its parent's process.
+      const parentTask =
+        keptSessions.size > 0 &&
+        projection.thread.lineage.relationshipToParent === "subagent" &&
+        projection.thread.lineage.parentThreadId !== null
+          ? yield* projections
+              .getThreadRecords(
+                projection.thread.lineage.parentThreadId,
+                ["providerThreads", "turnItems"],
+                {
+                  turnItemTypes: ["subagent"],
+                  turnItemStatuses: ["pending", "running", "waiting"],
+                },
+              )
+              .pipe(
+                Effect.map((parent) => {
+                  const item = parent.turnItems.find(
+                    (candidate) =>
+                      candidate.type === "subagent" &&
+                      candidate.childThreadId === projection.thread.id,
+                  );
+                  const since =
+                    item?.providerThreadId == null
+                      ? undefined
+                      : keptProcessStarts(parent.providerThreads, keptSessions).get(
+                          item.providerThreadId,
+                        );
+                  return item === undefined || since === undefined ? undefined : { item, since };
+                }),
+                Effect.catchTags({
+                  ProjectionStoreThreadNotFoundError: () => Effect.succeed(undefined),
+                }),
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderRuntimeRecoveryError({
+                      operation: "read-projections",
+                      threadId: projection.thread.id,
+                      cause,
+                    }),
+                ),
+              )
+          : undefined;
+      // Work begun before the keeper's process for its session started ran in an earlier process, and died with it.
+      const heldByKeeper = (
+        providerThreadId: ProviderThreadId | null | undefined,
+        startedAt: DateTime.Utc | null,
+      ) => {
+        const since =
+          providerThreadId == null ? parentTask?.since : keptSince.get(providerThreadId);
+        return (
+          since !== undefined &&
+          startedAt !== null &&
+          DateTime.toEpochMillis(startedAt) >= since - PROCESS_START_GRAIN_MS
+        );
+      };
+      const childHeld =
+        parentTask !== undefined &&
+        heldByKeeper(parentTask.item.providerThreadId, parentTask.item.startedAt);
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
       for (const run of nonterminalRuns(projection)) {
         if (run.status === "waiting") {
@@ -448,6 +517,10 @@ export const make = Effect.gen(function* () {
             candidate.runId === run.id &&
             (candidate.nodeId === null || !messageRequestNodeIds.has(candidate.nodeId)) &&
             !isAppOwnedDelegationItem(candidate) &&
+            !(
+              isBackgroundCapableTurnItemType(candidate.type) &&
+              heldByKeeper(candidate.providerThreadId, candidate.startedAt)
+            ) &&
             (candidate.status === "pending" ||
               candidate.status === "running" ||
               candidate.status === "waiting"),
@@ -503,7 +576,11 @@ export const make = Effect.gen(function* () {
         if (!isBackgroundCapableTurnItemType(item.type)) {
           continue;
         }
-        if (!isNonterminalTurnItemStatus(item.status) || isAppOwnedDelegationItem(item)) {
+        if (
+          !isNonterminalTurnItemStatus(item.status) ||
+          isAppOwnedDelegationItem(item) ||
+          heldByKeeper(item.providerThreadId, item.startedAt)
+        ) {
           continue;
         }
         const providerInstanceId = resolveStaleBackgroundItemProviderInstanceId(item, projection);
@@ -538,9 +615,23 @@ export const make = Effect.gen(function* () {
           }
         }
       }
-      // No provider process outlives the server, so a native subagent still open
-      // here never reports its end, whatever state its run and item are in.
+      // Only a process the keeper holds outlives the server, so any other native
+      // subagent still open here never reports its end, whatever state its run and item are in.
       for (const subagent of projection.subagents ?? []) {
+        const item = projection.turnItems.find(
+          (candidate) => candidate.type === "subagent" && candidate.subagentId === subagent.id,
+        );
+        if (
+          item === undefined
+            ? heldByKeeper(
+                subagent.providerThreadId ??
+                  projection.runs.find((run) => run.id === subagent.runId)?.providerThreadId,
+                subagent.startedAt,
+              )
+            : heldByKeeper(item.providerThreadId, item.startedAt)
+        ) {
+          continue;
+        }
         events.push(
           ...(yield* endOrphanedNativeSubagent({
             projection,
@@ -554,17 +645,19 @@ export const make = Effect.gen(function* () {
       }
       // A provider-native subagent thread has no runs; left running, the child
       // would show as working forever.
-      events.push(
-        ...(yield* endRunlessRootTurns({
-          threadId: projection.thread.id,
-          providerInstanceId: projection.thread.providerInstanceId,
-          projection,
-          status: "cancelled",
-          now,
-          emitted: events,
-          allocateEventId,
-        })),
-      );
+      if (!childHeld) {
+        events.push(
+          ...(yield* endRunlessRootTurns({
+            threadId: projection.thread.id,
+            providerInstanceId: projection.thread.providerInstanceId,
+            projection,
+            status: "cancelled",
+            now,
+            emitted: events,
+            allocateEventId,
+          })),
+        );
+      }
       for (const providerThread of projection.providerThreads ?? []) {
         const kept = keptProviderThreadIds.has(providerThread.id);
         const needsIdle = providerThread.status === "active";
