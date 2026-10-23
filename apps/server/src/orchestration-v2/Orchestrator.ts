@@ -292,6 +292,10 @@ export const OrchestratorV2Error = Schema.Union([
 ]);
 export type OrchestratorV2Error = typeof OrchestratorV2Error.Type;
 
+type BackgroundWorkCommand = Pick<OrchestrationV2ServerCommand, "type" | "commandId"> & {
+  readonly threadId: ThreadId;
+};
+
 export interface OrchestratorV2DispatchResult {
   readonly sequence: number;
   readonly storedEvents: ReadonlyArray<OrchestrationV2StoredEvent>;
@@ -920,7 +924,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const threadDispatch = yield* ThreadCommandExecutor.ThreadCommandExecutor;
 
   const mapDispatchError =
-    (command: OrchestrationV2ServerCommand) =>
+    (command: Pick<OrchestrationV2ServerCommand, "type" | "commandId">) =>
     <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, OrchestratorDispatchError, R> =>
       effect.pipe(
         Effect.mapError(
@@ -982,7 +986,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const makeEvent =
     /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
     Effect.fnUntraced(function* <Event extends OrchestrationV2DomainEvent>(
-      command: OrchestrationV2ServerCommand,
+      command: Pick<OrchestrationV2ServerCommand, "type" | "commandId">,
       event: Omit<Event, "id">,
     ) {
       const eventId = yield* mapDispatchError(command)(
@@ -998,7 +1002,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     });
 
   const emit =
-    (events: Ref.Ref<Array<OrchestrationV2DomainEvent>>, command: OrchestrationV2ServerCommand) =>
+    (
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+      command: Pick<OrchestrationV2ServerCommand, "type" | "commandId">,
+    ) =>
     <Event extends OrchestrationV2DomainEvent>(event: Omit<Event, "id">) =>
       Effect.gen(function* () {
         const withId = yield* makeEvent(command, event);
@@ -1924,6 +1931,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           session.status !== "stopped" &&
           session.status !== "error",
       );
+      const endedBackgroundWork = yield* Ref.make<Array<OrchestrationV2DomainEvent>>([]);
+      yield* endDetachedBackgroundWork({
+        command: { type: "message.dispatch", commandId, threadId },
+        events: endedBackgroundWork,
+        providerSessionIds: sessionsToDetach.map((session) => session.id),
+        now,
+      });
       yield* writeSystemEvents(
         [
           ...(selectionChanged
@@ -2027,6 +2041,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
               reason: "Provider or model selection changed.",
             },
           })),
+          ...(yield* Ref.get(endedBackgroundWork)),
           ...executionIdentityEvents,
           {
             type: "provider-thread.updated",
@@ -3714,6 +3729,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }),
         { concurrency: 1, discard: true },
       );
+      yield* endDetachedBackgroundWork({
+        command,
+        events,
+        providerSessionIds: liveSessions.map((session) => session.id),
+        now,
+      });
     }
 
     if (command.type === "thread.archive") {
@@ -6852,6 +6873,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           reason: "Provider account changed; continuing the native thread.",
         },
       });
+      yield* endDetachedBackgroundWork({
+        command,
+        events,
+        providerSessionIds: [previousProviderSessionId],
+        now,
+      });
       yield* Ref.update(effects, (existing) => [
         ...existing,
         {
@@ -8670,6 +8697,206 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
   });
 
+  // Ends background items whose process died, with the native subagents they ran.
+  const endBackgroundTurnItems = Effect.fn("Orchestrator.endBackgroundTurnItems")(
+    function* (input: {
+      readonly command: BackgroundWorkCommand;
+      readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
+      readonly projection: Pick<
+        OrchestrationV2ThreadProjection,
+        "runs" | "nodes" | "subagents" | "turnItems"
+      >;
+      readonly items: ReadonlyArray<OrchestrationV2TurnItem>;
+      readonly now: DateTime.Utc;
+    }) {
+      const emitEvent = emit(input.events, input.command);
+      const allocateEventId = () =>
+        idAllocator.allocate.event({
+          threadId: input.command.threadId,
+          commandId: input.command.commandId,
+        });
+      // An item this batch already ended keeps that ending.
+      const endedItemIds = () =>
+        Ref.get(input.events).pipe(
+          Effect.map(
+            (events) =>
+              new Set(
+                events.flatMap((event) =>
+                  event.type === "turn-item.updated" &&
+                  !isOrchestrationV2WorkActive(event.payload.status)
+                    ? [event.payload.id]
+                    : [],
+                ),
+              ),
+          ),
+        );
+      const alreadyEnded = yield* endedItemIds();
+      const childThreadIds = new Set<ThreadId>();
+      for (const item of input.items) {
+        if (alreadyEnded.has(item.id)) continue;
+        const run = input.projection.runs.find((candidate) => candidate.id === item.runId);
+        yield* emitEvent({
+          type: "turn-item.updated",
+          threadId: input.command.threadId,
+          ...(item.runId === null ? {} : { runId: item.runId }),
+          ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+          ...(run === undefined ? {} : { providerInstanceId: run.providerInstanceId }),
+          occurredAt: input.now,
+          payload: {
+            ...item,
+            status: "interrupted",
+            completedAt: input.now,
+            updatedAt: input.now,
+          },
+        });
+        if (item.type !== "subagent") continue;
+        // A native subagent died with the process too: end its record, its own
+        // thread's runless root turn, and the subagents it started there, which
+        // a provider can record on that thread rather than this one.
+        const dying: Array<{
+          readonly projection: Pick<
+            OrchestrationV2ThreadProjection,
+            "nodes" | "subagents" | "turnItems"
+          >;
+          readonly subagent: Pick<
+            Extract<OrchestrationV2TurnItem, { readonly type: "subagent" }>,
+            "subagentId" | "origin" | "childThreadId" | "providerInstanceId"
+          >;
+        }> = [{ projection: input.projection, subagent: item }];
+        for (const { projection, subagent } of dying) {
+          const ended = yield* endOrphanedNativeSubagent({
+            projection,
+            subagentId: subagent.subagentId,
+            status: "interrupted",
+            now: input.now,
+            emitted: yield* Ref.get(input.events),
+            allocateEventId,
+          }).pipe(mapDispatchError(input.command));
+          yield* Ref.update(input.events, (events) => [...events, ...ended]);
+          const childThreadId = subagent.childThreadId;
+          if (
+            subagent.origin !== "provider_native" ||
+            childThreadId === null ||
+            childThreadIds.has(childThreadId)
+          ) {
+            continue;
+          }
+          childThreadIds.add(childThreadId);
+          const child = yield* projectionStore
+            .getThreadRecords(childThreadId, ["nodes", "subagents", "turnItems"], {
+              // Runless items are the subagent's; any run there is the user's own.
+              turnItemRunIds: [null],
+              turnItemStatuses: ["pending", "running", "waiting"],
+            })
+            .pipe(
+              Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
+              mapDispatchError(input.command),
+            );
+          if (child === null) continue;
+          const childEnded = yield* endRunlessRootTurns({
+            threadId: childThreadId,
+            providerInstanceId: subagent.providerInstanceId,
+            projection: child,
+            status: "interrupted",
+            now: input.now,
+            emitted: yield* Ref.get(input.events),
+            allocateEventId,
+          }).pipe(mapDispatchError(input.command));
+          yield* Ref.update(input.events, (events) => [...events, ...childEnded]);
+          // Its shells sit under their tool calls, not the root turn.
+          const childEndedIds = yield* endedItemIds();
+          for (const shell of pendingBackgroundTurnItems({ turnItems: child.turnItems })) {
+            if (shell.type === "subagent" || childEndedIds.has(shell.id)) continue;
+            yield* emitEvent({
+              type: "turn-item.updated",
+              threadId: childThreadId,
+              ...(shell.nodeId === null ? {} : { nodeId: shell.nodeId }),
+              providerInstanceId: subagent.providerInstanceId,
+              occurredAt: input.now,
+              payload: {
+                ...shell,
+                status: "interrupted",
+                completedAt: input.now,
+                updatedAt: input.now,
+              },
+            });
+          }
+          for (const nested of child.turnItems) {
+            if (nested.type === "subagent") dying.push({ projection: child, subagent: nested });
+          }
+          for (const nested of child.subagents) {
+            if (nested.origin === "provider_native" && nested.runId === null) {
+              dying.push({
+                projection: child,
+                subagent: {
+                  subagentId: nested.id,
+                  origin: nested.origin,
+                  childThreadId: nested.childThreadId,
+                  providerInstanceId: nested.providerInstanceId,
+                },
+              });
+            }
+          }
+        }
+      }
+    },
+  );
+
+  // A detached session that holds one provider thread is released, so its
+  // process dies with the background work it ran. App-owned children run in
+  // their own threads and survive.
+  const endDetachedBackgroundWork = Effect.fn("Orchestrator.endDetachedBackgroundWork")(
+    function* (input: {
+      readonly command: BackgroundWorkCommand;
+      readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
+      readonly providerSessionIds: ReadonlyArray<ProviderSessionId>;
+      readonly now: DateTime.Utc;
+    }) {
+      if (input.providerSessionIds.length === 0) return;
+      const projection = yield* projectionStore
+        .getThreadRecords(
+          input.command.threadId,
+          ["runs", "nodes", "subagents", "turnItems", "providerThreads", "providerSessions"],
+          {
+            turnItemTypes: ["command_execution", "dynamic_tool", "subagent"],
+            turnItemStatuses: ["pending", "running", "waiting"],
+          },
+        )
+        .pipe(mapDispatchError(input.command));
+      const released = new Set(
+        projection.providerSessions.flatMap((session) =>
+          input.providerSessionIds.includes(session.id) &&
+          !session.capabilities.sessions.supportsMultipleProviderThreadsPerSession
+            ? [session.id]
+            : [],
+        ),
+      );
+      const dyingProviderThreadIds = new Set(
+        projection.providerThreads.flatMap((providerThread) =>
+          providerThread.providerSessionId !== null &&
+          released.has(providerThread.providerSessionId)
+            ? [providerThread.id]
+            : [],
+        ),
+      );
+      yield* endBackgroundTurnItems({
+        command: input.command,
+        events: input.events,
+        projection,
+        items: pendingBackgroundTurnItems({
+          turnItems: projection.turnItems,
+          runs: projection.runs,
+        }).filter(
+          (item) =>
+            item.providerThreadId != null &&
+            dyingProviderThreadIds.has(item.providerThreadId) &&
+            !(item.type === "subagent" && item.origin === "app_owned"),
+        ),
+        now: input.now,
+      });
+    },
+  );
+
   const settleBackgroundWork = Effect.fn("Orchestrator.settleBackgroundWork")(function* (input: {
     readonly command: Extract<
       OrchestrationV2ServerCommand,
@@ -8686,12 +8913,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   }) {
     const emitEvent = emit(input.events, input.command);
     const runOrdinals = new Map(input.projection.runs.map((run) => [run.id, run.ordinal]));
-    const allocateEventId = () =>
-      idAllocator.allocate.event({
-        threadId: input.command.threadId,
-        commandId: input.command.commandId,
-      });
-    const childThreadIds = new Set<ThreadId>();
     const liveness = new Map<string, boolean>();
     const hasLiveSession = Effect.fn("Orchestrator.hasLiveSession")(function* (
       providerThreadId: OrchestrationV2ProviderThread["id"],
@@ -8725,6 +8946,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         // A failed probe cannot confirm that the work ended.
         .pipe(Effect.catchCause(() => Effect.succeed(true)));
     });
+    const ending: Array<OrchestrationV2TurnItem> = [];
     for (const item of pendingBackgroundTurnItems({
       turnItems: input.projection.turnItems,
       runs: input.projection.runs,
@@ -8739,93 +8961,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       ) {
         continue;
       }
-      const run = input.projection.runs.find((candidate) => candidate.id === item.runId);
-      yield* emitEvent({
-        type: "turn-item.updated",
-        threadId: input.command.threadId,
-        ...(item.runId === null ? {} : { runId: item.runId }),
-        ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
-        ...(run === undefined ? {} : { providerInstanceId: run.providerInstanceId }),
-        occurredAt: input.now,
-        payload: {
-          ...item,
-          status: "interrupted",
-          completedAt: input.now,
-          updatedAt: input.now,
-        },
-      });
-      if (item.type !== "subagent") continue;
-      // A native subagent died with the process too: end its record, its own
-      // thread's runless root turn, and the subagents it started there, which
-      // a provider can record on that thread rather than this one.
-      const dying: Array<{
-        readonly projection: Pick<
-          OrchestrationV2ThreadProjection,
-          "nodes" | "subagents" | "turnItems"
-        >;
-        readonly subagent: Pick<
-          Extract<OrchestrationV2TurnItem, { readonly type: "subagent" }>,
-          "subagentId" | "origin" | "childThreadId" | "providerInstanceId"
-        >;
-      }> = [{ projection: input.projection, subagent: item }];
-      for (const { projection, subagent } of dying) {
-        const ended = yield* endOrphanedNativeSubagent({
-          projection,
-          subagentId: subagent.subagentId,
-          status: "interrupted",
-          now: input.now,
-          emitted: yield* Ref.get(input.events),
-          allocateEventId,
-        }).pipe(mapDispatchError(input.command));
-        yield* Ref.update(input.events, (events) => [...events, ...ended]);
-        const childThreadId = subagent.childThreadId;
-        if (
-          subagent.origin !== "provider_native" ||
-          childThreadId === null ||
-          childThreadIds.has(childThreadId)
-        ) {
-          continue;
-        }
-        childThreadIds.add(childThreadId);
-        const child = yield* projectionStore
-          .getThreadRecords(childThreadId, ["nodes", "subagents", "turnItems"], {
-            // Runless items are the subagent's; any run there is the user's own.
-            turnItemRunIds: [null],
-            turnItemStatuses: ["pending", "running", "waiting"],
-          })
-          .pipe(
-            Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(null) }),
-            mapDispatchError(input.command),
-          );
-        if (child === null) continue;
-        const childEnded = yield* endRunlessRootTurns({
-          threadId: childThreadId,
-          providerInstanceId: subagent.providerInstanceId,
-          projection: child,
-          status: "interrupted",
-          now: input.now,
-          emitted: yield* Ref.get(input.events),
-          allocateEventId,
-        }).pipe(mapDispatchError(input.command));
-        yield* Ref.update(input.events, (events) => [...events, ...childEnded]);
-        for (const nested of child.turnItems) {
-          if (nested.type === "subagent") dying.push({ projection: child, subagent: nested });
-        }
-        for (const nested of child.subagents) {
-          if (nested.origin === "provider_native" && nested.runId === null) {
-            dying.push({
-              projection: child,
-              subagent: {
-                subagentId: nested.id,
-                origin: nested.origin,
-                childThreadId: nested.childThreadId,
-                providerInstanceId: nested.providerInstanceId,
-              },
-            });
-          }
-        }
-      }
+      ending.push(item);
     }
+    yield* endBackgroundTurnItems({
+      command: input.command,
+      events: input.events,
+      projection: input.projection,
+      items: ending,
+      now: input.now,
+    });
     for (const providerThread of input.projection.providerThreads) {
       if ((providerThread.pendingBackgroundTasks?.length ?? 0) === 0) continue;
       if (providerThread.id === input.stoppedProviderThreadId) {

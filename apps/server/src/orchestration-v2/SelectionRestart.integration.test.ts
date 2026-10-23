@@ -4,6 +4,8 @@ import {
   EventId,
   MessageId,
   type ModelSelection,
+  NodeId,
+  type OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderSession,
   type OrchestrationV2ProviderThread,
@@ -15,6 +17,7 @@ import {
   ProviderTurnId,
   type RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -996,4 +999,194 @@ it.live.each(["active", "idle", "selection-command", "pooled", "separate-home"] 
         }).pipe(Effect.provide(ProviderReplayHarness.layerWithRegistry({ name }, layerRegistry)));
       }),
     ),
+);
+
+it.live("a queued run on another account ends the background work the old session ran", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const name = "queued-account-switch-background-work";
+      const cwd = yield* checkpointWorkspace(name);
+      const threadId = ThreadId.make(`thread:${name}`);
+      const targetId = ProviderInstanceId.make("codex-shadow-account");
+      const state = yield* Ref.make<RestartAdapterState>({
+        activeTurn: null,
+        opened: [],
+        started: [],
+        closedSessionCount: 0,
+        failedReplacementOpen: true,
+      });
+      const finish = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+      const adapters = [providerInstanceId, targetId].map((instanceId) => {
+        const base = makeRestartAdapter(state, exclusiveCapabilities, instanceId);
+        return {
+          ...base,
+          openSession: (input) =>
+            base.openSession(input).pipe(
+              Effect.map((session) => ({
+                ...session,
+                events: Stream.merge(session.events, Stream.fromQueue(finish)),
+              })),
+            ),
+        } satisfies ProviderAdapter.ProviderAdapterV2["Service"];
+      });
+      const items = yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const watch = (predicate: (event: OrchestrationV2DomainEvent) => boolean) =>
+          orchestrator.streamDomainEvents.pipe(
+            Stream.filter(predicate),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+        const send = (step: string, modelSelection: ModelSelection) =>
+          orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`${name}:${step}`),
+            threadId,
+            messageId: MessageId.make(`${name}:${step}`),
+            text: step,
+            attachments: [],
+            modelSelection,
+            dispatchMode: { type: "queue_after_active" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+        yield* orchestrator.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make(`${name}:create`),
+          threadId,
+          projectId: ProjectId.make(`project:${name}`),
+          title: name,
+          modelSelection: initialSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: cwd,
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const running = yield* watch(
+          (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
+        );
+        yield* send("first", initialSelection);
+        yield* worker.drain();
+        yield* Fiber.join(running);
+        const first = yield* orchestrator.getThreadProjection(threadId);
+        const run = first.runs[0]!;
+        const providerTurn = first.providerTurns[0]!;
+        const now = yield* DateTime.now;
+        const item = {
+          threadId,
+          runId: run.id,
+          nodeId: run.rootNodeId,
+          providerThreadId: providerTurn.providerThreadId,
+          providerTurnId: providerTurn.id,
+          nativeItemRef: null,
+          parentItemId: null,
+          status: "running" as const,
+          title: null,
+          startedAt: now,
+          completedAt: null,
+          updatedAt: now,
+        };
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`${name}:shell`),
+              type: "turn-item.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: {
+                ...item,
+                id: TurnItemId.make(`${name}:shell`),
+                ordinal: 100,
+                type: "command_execution",
+                input: "vp run dev",
+              },
+            },
+            {
+              id: EventId.make(`${name}:delegate`),
+              type: "turn-item.updated",
+              threadId,
+              runId: run.id,
+              occurredAt: now,
+              payload: {
+                ...item,
+                id: TurnItemId.make(`${name}:delegate`),
+                ordinal: 101,
+                type: "subagent",
+                subagentId: NodeId.make(`${name}:delegate`),
+                origin: "app_owned",
+                driver,
+                providerInstanceId,
+                childThreadId: ThreadId.make(`thread:${name}:child`),
+                prompt: "Delegated task",
+                result: null,
+              },
+            },
+          ],
+        });
+        yield* send("second", { instanceId: targetId, model: "complete" });
+        const switched = yield* watch(
+          (event) =>
+            event.type === "run.updated" &&
+            event.payload.id !== run.id &&
+            event.payload.status === "completed",
+        );
+        const active = (yield* Ref.get(state)).activeTurn!;
+        const completedAt = yield* DateTime.now;
+        yield* Queue.offerAll(finish, [
+          {
+            type: "provider_turn.updated",
+            driver,
+            providerTurn: {
+              id: active.providerTurnId,
+              providerThreadId: active.input.providerThread.id,
+              nodeId: active.input.rootNodeId,
+              runAttemptId: active.input.attemptId,
+              nativeTurnRef: {
+                driver,
+                nativeId: `native:${active.providerTurnId}`,
+                strength: "strong",
+              },
+              ordinal: active.input.providerTurnOrdinal,
+              status: "completed",
+              startedAt: completedAt,
+              completedAt,
+            },
+          },
+          {
+            type: "turn.terminal",
+            driver,
+            providerThreadId: active.input.providerThread.id,
+            providerTurnId: active.providerTurnId,
+            runOrdinal: active.input.runOrdinal,
+            status: "completed",
+            failure: null,
+            threadDisposition: "reusable",
+          },
+        ]);
+        yield* worker.drain();
+        yield* Fiber.join(switched);
+        yield* worker.drain();
+        const after = yield* orchestrator.getThreadProjection(threadId);
+        return Object.fromEntries(
+          after.turnItems.map((turnItem) => [turnItem.id, turnItem.status]),
+        );
+      }).pipe(
+        Effect.provide(
+          ProviderReplayHarness.layerWithRegistry(
+            { name },
+            ProviderAdapterRegistry.layerFromAdapters(adapters),
+          ),
+        ),
+      );
+
+      assert.equal(items[`${name}:shell`], "interrupted");
+      assert.equal(items[`${name}:delegate`], "running");
+    }),
+  ),
 );
