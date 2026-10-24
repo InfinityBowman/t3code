@@ -12,7 +12,6 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   activeSessions,
-  makeUsageHistory,
   pickPoolAccount,
   poolAccountBlockedUntil,
   poolAccountOverrun,
@@ -25,9 +24,23 @@ const pool = [a, b];
 const model = "claude-opus-5-5";
 
 const session = (usedPercent: number, resetsAt = "2026-10-18T18:00:00.000Z") =>
-  ({ id: "five_hour", kind: "session", label: "Session", usedPercent, resetsAt }) as const;
+  ({
+    id: "five_hour",
+    kind: "session",
+    label: "Session",
+    usedPercent,
+    resetsAt,
+    windowDurationMins: 300,
+  }) as const;
 const weekly = (usedPercent: number, resetsAt: string, id = "seven_day") =>
-  ({ id, kind: "weekly", label: "Weekly", usedPercent, resetsAt }) as const;
+  ({
+    id,
+    kind: "weekly",
+    label: "Weekly",
+    usedPercent,
+    resetsAt,
+    windowDurationMins: 7 * 24 * 60,
+  }) as const;
 
 // Only the fields routing reads; the rest of a snapshot does not bear on it.
 const account = (
@@ -45,7 +58,7 @@ const account = (
 
 // A's weekly window resets in 28 hours, B's in 80.
 const aWeek = "2026-10-19T19:00:00.000Z";
-const soonA = account(a, [session(10), weekly(80, aWeek)]);
+const soonA = account(a, [session(10), weekly(70, aWeek)]);
 const laterB = account(b, [session(0), weekly(5, "2026-10-21T23:00:00.000Z")]);
 const pick = (
   providers: ReadonlyArray<ServerProvider>,
@@ -54,7 +67,7 @@ const pick = (
   pickPoolAccount({
     pool,
     providers,
-    load: { sessions: new Map([[a, extra.sessionsOnA ?? 0]]), history: makeUsageHistory() },
+    load: { sessions: new Map([[a, extra.sessionsOnA ?? 0]]) },
     model,
     nowMs,
     ...extra,
@@ -71,40 +84,35 @@ describe("pickPoolAccount", () => {
   });
 
   it("counts every session on an account against the use left before its reset", () => {
-    // 80% plus 28 hours at 0.05 points a session an hour: nine sessions and the new thread fit under
-    // 95%, ten do not.
-    expect(pick([soonA, laterB], { sessionsOnA: 9 })).toBe(a);
-    expect(pick([soonA, laterB], { sessionsOnA: 10 })).toBe(b);
-  });
-
-  it("projects an account's measured burn to its reset", () => {
-    const history = makeUsageHistory();
-    history.record([account(a, [weekly(70, aWeek)], "2026-10-18T13:59:00.000Z")]);
-    history.record([account(a, [weekly(72, aWeek)], "2026-10-18T14:59:00.000Z")]);
-    const quietA = account(a, [weekly(72, aWeek)]);
-    // 2 points an hour from 72% passes 95% long before the reset, whatever the session count.
-    expect(
-      pickPoolAccount({
-        pool,
-        providers: [quietA, laterB],
-        load: { sessions: new Map(), history },
-        model,
-        nowMs,
-      }),
-    ).toBe(b);
-    expect(pick([quietA, laterB])).toBe(a);
+    // 70% plus 28 hours at 0.05 points a session an hour: sixteen sessions and the new thread fit under
+    // 95%, seventeen do not.
+    const weekOnly = account(a, [weekly(70, aWeek)]);
+    expect(pick([weekOnly, laterB], { sessionsOnA: 16 })).toBe(a);
+    expect(pick([weekOnly, laterB], { sessionsOnA: 17 })).toBe(b);
   });
 
   it("projects a weekly window at its average so far, not a busy few hours", () => {
-    // Oct 24: A at 65% after 117 hours, 51 to its reset, after a morning at 2 points an hour. Its average,
-    // 0.56 points an hour, ends it at 93%.
-    const history = makeUsageHistory();
-    const week = { ...weekly(59, "2026-10-20T18:00:00.000Z"), windowDurationMins: 7 * 24 * 60 };
-    history.record([account(a, [week], "2026-10-18T11:59:00.000Z")]);
-    const now = account(a, [{ ...week, usedPercent: 65 }]);
-    history.record([now]);
-    const overrun = poolAccountOverrun(now, model, nowMs, { sessions: new Map(), history }, 0);
-    expect(overrun).toBeCloseTo(65 + (65 / 117) * 51 - 95, 5);
+    // Oct 24: A at 65% after 117 hours, 51 to its reset. Its average, 0.56 points an hour, ends it at 93%.
+    const busyA = account(a, [weekly(65, "2026-10-20T18:00:00.000Z")]);
+    expect(poolAccountOverrun(busyA, model, nowMs, { sessions: new Map() }, 0)).toBeCloseTo(
+      65 + (65 / 117) * 51 - 95,
+      5,
+    );
+  });
+
+  it("averages a window's first hours over a day, so a heavy start still reads as heavy", () => {
+    // Three hours into the week: 15% over a day is 0.63 points an hour, past 95% by the reset; 2% is not.
+    const week = "2026-10-25T12:00:00.000Z";
+    const overrun = (used: number) =>
+      poolAccountOverrun(
+        account(a, [weekly(used, week)]),
+        model,
+        nowMs,
+        { sessions: new Map() },
+        0,
+      );
+    expect(overrun(15)).toBeGreaterThan(0);
+    expect(overrun(2)).toBeLessThan(0);
   });
 
   it("lets a used-up model window bind only threads on that model", () => {
@@ -131,7 +139,6 @@ describe("pickPoolAccount", () => {
     const quietA = account(a, [unopened, weekly(0, "2026-10-25T19:00:00.000Z")]);
     const load = (sessionsOnB: number) => ({
       sessions: new Map([[b, sessionsOnB]]),
-      history: makeUsageHistory(),
     });
     expect(pickPoolAccount({ pool, providers: [quietA, busyB], load: load(9), model, nowMs })).toBe(
       a,

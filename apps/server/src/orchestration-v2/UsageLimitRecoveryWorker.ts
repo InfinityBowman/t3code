@@ -16,7 +16,6 @@ import {
   poolAccountBlockedUntil,
   poolAccountOverrun,
   poolLoad,
-  usageHistory,
 } from "../provider/accountPool.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
@@ -172,9 +171,7 @@ export const makeSweep = Effect.gen(function* () {
       probedAt.set(instanceId, nowMs);
       yield* registry.refreshInstance(instanceId);
     }
-    const providers = yield* registry.getProviders;
-    usageHistory.record(providers);
-    return providers;
+    return yield* registry.getProviders;
   });
 
   return Effect.fn("UsageLimitRecoveryWorker.sweep")(function* () {
@@ -314,8 +311,6 @@ export const makeSweep = Effect.gen(function* () {
           rebalancedAt.set(instanceId, nowMs);
         }
       }
-      // Moves change the accounts' loads, so their burn is measured afresh.
-      for (const [instanceId, delta] of shift) if (delta !== 0) usageHistory.forget(instanceId);
     }
     const candidates = yield* projections.getLimitRecoveryCandidates({
       now,

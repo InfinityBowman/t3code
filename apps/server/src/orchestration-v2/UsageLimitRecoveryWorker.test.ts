@@ -205,8 +205,9 @@ const busyB = withWindows(b, [
     id: "five_hour",
     kind: "session",
     label: "Session",
-    usedPercent: 70,
+    usedPercent: 50,
     resetsAt: "2026-10-18T18:00:00.000Z",
+    windowDurationMins: 300,
   },
   {
     id: "seven_day",
@@ -214,6 +215,7 @@ const busyB = withWindows(b, [
     label: "Weekly",
     usedPercent: 20,
     resetsAt: "2026-10-21T23:00:00.000Z",
+    windowDurationMins: 7 * 24 * 60,
   },
 ]);
 const quietA = withWindows(a, [
@@ -224,6 +226,7 @@ const quietA = withWindows(a, [
     label: "Weekly",
     usedPercent: 0,
     resetsAt: "2026-10-25T19:00:00.000Z",
+    windowDurationMins: 7 * 24 * 60,
   },
 ]);
 
@@ -274,7 +277,8 @@ const sweepBusy = (
 
 it.effect("moves an account's newest running threads off it until its five-hour window fits", () =>
   Effect.gen(function* () {
-    // 70% + 6 sessions × 2 points an hour × 3 hours passes the 90% room; three fewer sessions fit.
+    // 50% two hours in is 25 points an hour, past the 90% room in the 3 hours left; each move takes off one of
+    // its six sessions' share, about 4 an hour, so three must go.
     const moved = yield* sweepBusy(
       [1, 2, 3, 4, 5, 6].map((ageHours) => ({ id: `thread:${ageHours}`, running: true, ageHours })),
       [],

@@ -11,13 +11,14 @@ import type {
 
 // An account has room while its projected use at each window's reset stays at or under these.
 const ROOM_PERCENT = { session: 90, weekly: 95 } as const;
-// Burn per active session (points an hour), a floor under the measured rate and its stand-in until 45 minutes
-// of readings exist. On Oct 19, account B spent about 20 five-hour points an hour across some 13 sessions, and
-// about 0.6 weekly points an hour across some 10; a busy Oct 18 on A ran 1.5 across nine. A weekly floor near
-// the busy rate would fill a freshly reset account after three sessions, a week out from its reset.
+// Burn per active session (points an hour), a floor under a window's average. On Oct 19, account B spent about
+// 20 five-hour points an hour across some 13 sessions, and about 0.6 weekly points an hour across some 10; a busy
+// Oct 18 on A ran 1.5 across nine. A weekly floor near the busy rate would fill a freshly reset account after
+// three sessions, a week out from its reset.
 const SESSION_BURN_PER_HOUR = { session: 2, weekly: 0.05 } as const;
-const BURN_WINDOW_MS = 3 * 60 * 60 * 1000;
-const MIN_BURN_SPAN_MS = 45 * 60 * 1000;
+// A window burns at its use so far over the hours it has been open, at least these: a heavy start still reads
+// as heavy, but a first hour isn't projected to a reset days out as the rate.
+const MIN_OPEN_HOURS = { session: 1, weekly: 24 } as const;
 // A session counts as active while its transcript was written this recently.
 const ACTIVE_SESSION_MS = 15 * 60 * 1000;
 const SESSION_COUNT_TTL_MS = 60 * 1000;
@@ -58,49 +59,6 @@ export function poolAccountBlockedUntil(
   return resets.length === 0 ? undefined : Math.max(...resets);
 }
 
-/** Each pooled account's usage readings over the last few hours, for its measured burn rate. */
-export function makeUsageHistory() {
-  const samples = new Map<string, Array<{ readonly atMs: number; readonly used: number }>>();
-  // One series per window period, so a reset starts a new one.
-  const key = (instanceId: ProviderInstanceId, window: ServerProviderUsageWindow) =>
-    `${instanceId}\0${window.id}\0${window.resetsAt ?? ""}`;
-  return {
-    record(providers: ReadonlyArray<ServerProvider>) {
-      for (const provider of providers) {
-        const checkedAt = provider.usageLimits?.checkedAt;
-        if (checkedAt === undefined) continue;
-        const atMs = Date.parse(checkedAt);
-        for (const window of provider.usageLimits?.windows ?? []) {
-          const series = samples.get(key(provider.instanceId, window)) ?? [];
-          if (series.at(-1)?.atMs === atMs) continue;
-          series.push({ atMs, used: window.usedPercent });
-          samples.set(
-            key(provider.instanceId, window),
-            series.filter((sample) => atMs - sample.atMs <= BURN_WINDOW_MS),
-          );
-        }
-      }
-    },
-    /** Restarts an account's measurement once moves change its load, so the old rate isn't projected. */
-    forget(instanceId: ProviderInstanceId) {
-      for (const key of samples.keys()) if (key.startsWith(`${instanceId}\0`)) samples.delete(key);
-    },
-    perHour(instanceId: ProviderInstanceId, window: ServerProviderUsageWindow, nowMs: number) {
-      const series = (samples.get(key(instanceId, window)) ?? []).filter(
-        (sample) => nowMs - sample.atMs <= BURN_WINDOW_MS,
-      );
-      const first = series[0];
-      const last = series.at(-1);
-      if (first === undefined || last === undefined || last.atMs - first.atMs < MIN_BURN_SPAN_MS)
-        return undefined;
-      return Math.max(0, ((last.used - first.used) * 3_600_000) / (last.atMs - first.atMs));
-    },
-  };
-}
-export type UsageHistory = ReturnType<typeof makeUsageHistory>;
-/** The server's one history: the recovery sweep records into it and every launch reads it. */
-export const usageHistory = makeUsageHistory();
-
 /** A Claude instance's config folder: its homePath, else Claude Code's default. */
 export function claudeHome(homePath: unknown): string {
   const configured = typeof homePath === "string" ? homePath.trim() : "";
@@ -139,10 +97,9 @@ export function activeSessions(home: string, nowMs: number): number {
 
 export interface PoolLoad {
   readonly sessions: ReadonlyMap<ProviderInstanceId, number>;
-  readonly history: UsageHistory;
 }
 
-/** The pool's load now, from each instance's configured home and the server's usage history. */
+/** The pool's load now, from each instance's configured home. */
 export function poolLoad(
   pool: ReadonlyArray<ProviderInstanceId>,
   instances: Readonly<Record<string, { readonly config?: unknown } | undefined>>,
@@ -157,15 +114,14 @@ export function poolLoad(
         activeSessions(claudeHome(homePath(instanceId)), nowMs),
       ]),
     ),
-    history: usageHistory,
   };
 }
 
 /**
  * How far past its room this account ends at each window's reset, with `extra` more sessions (fewer when
  * negative): the worst window's projected use minus its room, so a value over zero means it runs past it.
- * Burn is the measured rate, never under its sessions' floor; each extra session adds an average session's
- * share. A window not yet opened opens with the next request and runs its full length.
+ * Burn is the window's average so far, never under its sessions' floor; each extra session adds an average
+ * session's share. A window not yet opened opens with the next request and runs its full length.
  */
 export function poolAccountOverrun(
   provider: ServerProvider,
@@ -181,22 +137,11 @@ export function poolAccountOverrun(
       window.resetsAt !== undefined
         ? (Date.parse(window.resetsAt) - nowMs) / 3_600_000
         : (window.windowDurationMins ?? 0) / 60;
-    // A weekly window burns at its average so far (over a day at least): a few busy hours projected across
-    // the nights to a reset days out would move threads off an account with plenty left.
-    const openedMs =
-      window.resetsAt !== undefined && window.windowDurationMins
-        ? Date.parse(window.resetsAt) - window.windowDurationMins * 60_000
-        : undefined;
-    const measured =
-      kind === "weekly" && openedMs !== undefined
-        ? window.usedPercent / Math.max((nowMs - openedMs) / 3_600_000, 24)
-        : load.history.perHour(provider.instanceId, window, nowMs);
+    const openHours = (window.windowDurationMins ?? 0) / 60 - hours;
+    const average = window.usedPercent / Math.max(openHours, MIN_OPEN_HOURS[kind]);
     const floor = SESSION_BURN_PER_HOUR[kind];
-    const burn = Math.max(measured ?? 0, sessions * floor);
-    const perSession = Math.max(
-      floor,
-      measured !== undefined && sessions > 0 ? measured / sessions : 0,
-    );
+    const burn = Math.max(average, sessions * floor);
+    const perSession = Math.max(floor, sessions > 0 ? average / sessions : 0);
     return window.usedPercent + Math.max(0, burn + extra * perSession) * hours - ROOM_PERCENT[kind];
   });
   return Math.max(-Infinity, ...overruns);
