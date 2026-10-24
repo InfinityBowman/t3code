@@ -47,14 +47,15 @@ function liveWindows(provider: ServerProvider, model: string, nowMs: number) {
     );
 }
 
-/** When the account can serve this model again, if a window is used up; otherwise undefined. */
+/** When a window at `atPercent` or past it resets (by default, when a used-up account can serve again). */
 export function poolAccountBlockedUntil(
   provider: ServerProvider,
   model: string,
   nowMs: number,
+  atPercent = 100,
 ): number | undefined {
   const resets = liveWindows(provider, model, nowMs)
-    .filter((window) => window.usedPercent >= 100 && window.resetsAt !== undefined)
+    .filter((window) => window.usedPercent >= atPercent && window.resetsAt !== undefined)
     .map((window) => Date.parse(window.resetsAt!));
   return resets.length === 0 ? undefined : Math.max(...resets);
 }

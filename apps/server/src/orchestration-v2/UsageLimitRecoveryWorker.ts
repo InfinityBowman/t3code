@@ -14,7 +14,6 @@ import {
   ACCOUNT_MOVE_MIN_WAIT_MS,
   pickPoolAccount,
   poolAccountBlockedUntil,
-  poolAccountOverrun,
   poolLoad,
 } from "../provider/accountPool.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
@@ -26,16 +25,14 @@ import * as ThreadManagement from "./ThreadManagementService.ts";
 
 // Usage is probed only on demand, so an idle pooled account is re-probed this often to route on.
 const POOL_USAGE_MAX_AGE_MS = 10 * 60 * 1000;
-// After balancing moves, an account's session count needs 15 minutes to drop the threads that left.
-const REBALANCE_COOLDOWN_MS = 20 * 60 * 1000;
-// A thread a move placed stays put this long, so two accounts never pass it back and forth.
-const MOVED_THREAD_HOLD_MS = 60 * 60 * 1000;
+// A thread between turns leaves an account this full, before a limit would stop it mid-turn.
+const NEARLY_FULL_PERCENT = 99;
 
 const MOVE_TEXT = {
   limit:
     "The previous account reached its usage limit, so this thread moved to another account. Continue where you left off.",
-  balance:
-    "This thread moved to another account, since the previous one would run out before its reset. Continue where you left off.",
+  nearlyFull:
+    "The previous account was nearly at its usage limit, so this thread moved to another account. Continue where you left off.",
   apart:
     "This thread moved to another account, so it never shares one with the other threads kept apart from it. Continue where you left off.",
 } as const;
@@ -148,8 +145,6 @@ export const makeSweep = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const registry = yield* ProviderRegistry.ProviderRegistry;
   const probedAt = new Map<ProviderInstanceId, number>();
-  const rebalancedAt = new Map<ProviderInstanceId, number>();
-  const movedAt = new Map<ThreadId, number>();
 
   const dispatchAll = (threadId: ThreadId, commands: ReadonlyArray<OrchestrationV2Command>) =>
     Effect.forEach(commands, (command) => threads.dispatch(command), { discard: true }).pipe(
@@ -211,7 +206,7 @@ export const makeSweep = Effect.gen(function* () {
         thread: (typeof active)[number] | ProjectionStore.ProjectionLimitRecoveryCandidate,
         targetInstanceId: ProviderInstanceId,
         key: string,
-        reason?: "balance" | "apart",
+        reason?: "nearlyFull" | "apart",
       ) =>
         Effect.gen(function* () {
           yield* dispatchAll(
@@ -226,7 +221,6 @@ export const makeSweep = Effect.gen(function* () {
           );
           moved.add(thread.id);
           placed.set(thread.id, targetInstanceId);
-          movedAt.set(thread.id, nowMs);
           shift.set(thread.providerInstanceId, (shift.get(thread.providerInstanceId) ?? 0) - 1);
           shift.set(targetInstanceId, (shift.get(targetInstanceId) ?? 0) + 1);
         });
@@ -277,39 +271,23 @@ export const makeSweep = Effect.gen(function* () {
         if (targetInstanceId === undefined) continue;
         yield* move(thread, targetInstanceId, `idle:${nowMs}`, "apart");
       }
-      // An account whose use would pass its room before a window's reset, the five-hour one or the weekly,
-      // hands its newest running threads, one by one until it fits, to accounts with room, so it never
-      // reaches its limit while another has room. Threads kept apart stay put; a blocked account is the
-      // limit moves' to handle.
-      for (const instanceId of pool) {
-        if (nowMs - (rebalancedAt.get(instanceId) ?? 0) < REBALANCE_COOLDOWN_MS) continue;
-        const provider = providers.find((candidate) => candidate.instanceId === instanceId);
-        if (provider === undefined) continue;
-        const running = active
-          .filter(
-            (candidate) =>
-              candidate.providerInstanceId === instanceId &&
-              candidate.runningRunId !== null &&
-              !moved.has(candidate.id) &&
-              !apart.has(candidate.id) &&
-              nowMs - (movedAt.get(candidate.id) ?? -Infinity) >= MOVED_THREAD_HOLD_MS,
-          )
-          .toSorted(
-            (left, right) =>
-              DateTime.toEpochMillis(right.createdAt) - DateTime.toEpochMillis(left.createdAt),
+      // Only a nearly used-up account moves threads between turns, so no turn is cut; a projection never moves
+      // one, it only places new threads.
+      for (const thread of active) {
+        if (thread.runningRunId !== null || moved.has(thread.id)) continue;
+        const provider = providers.find((p) => p.instanceId === thread.providerInstanceId);
+        const fullUntil =
+          provider &&
+          poolAccountBlockedUntil(
+            provider,
+            thread.modelSelection.model,
+            nowMs,
+            NEARLY_FULL_PERCENT,
           );
-        for (const thread of running) {
-          const model = thread.modelSelection.model;
-          if (
-            poolAccountBlockedUntil(provider, model, nowMs) !== undefined ||
-            poolAccountOverrun(provider, model, nowMs, load, shift.get(instanceId) ?? 0) <= 0
-          )
-            break;
-          const targetInstanceId = pick(thread, instanceId);
-          if (targetInstanceId === undefined) break;
-          yield* move(thread, targetInstanceId, thread.runningRunId!, "balance");
-          rebalancedAt.set(instanceId, nowMs);
-        }
+        if (fullUntil === undefined || !longLimit(thread.providerInstanceId, fullUntil)) continue;
+        const targetInstanceId = pick(thread, thread.providerInstanceId);
+        if (targetInstanceId === undefined) continue;
+        yield* move(thread, targetInstanceId, `idle:${nowMs}`, "nearlyFull");
       }
     }
     const candidates = yield* projections.getLimitRecoveryCandidates({

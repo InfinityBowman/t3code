@@ -158,24 +158,23 @@ it.effect("waits out a limit that lifts within half an hour", () =>
   }),
 );
 
-it.effect("moves a running thread off an account whose weekly use would pass its room", () =>
+it.effect("moves a thread off a nearly used-up account between turns, never cutting one", () =>
   Effect.gen(function* () {
-    const dispatched = yield* sweepOnce({
-      aResetsAt: "2026-10-19T19:00:00.000Z",
-      aUsed: 97,
-      running: true,
-      failed: false,
-    });
-    const [switched, message] = dispatched;
+    const at = (aUsed: number, running: boolean) =>
+      sweepOnce({ aResetsAt: "2026-10-19T19:00:00.000Z", aUsed, running, failed: false });
+    assert.deepEqual(yield* at(99, true), []);
+    // 97% would pass the 95% room by the reset, but a projection never moves a thread.
+    assert.deepEqual(yield* at(97, false), []);
+    const [switched, message] = yield* at(99, false);
     assert.equal(switched?.type === "provider.switch" && switched.modelSelection.instanceId, b);
     assert.match(
       message?.type === "message.dispatch" ? message.text : "",
-      /run out before its reset/,
+      /nearly at its usage limit/,
     );
   }),
 );
 
-// B holds six running threads and sits at 70% of a five-hour window that resets in three hours.
+// B holds six running threads and sits at 50% of a five-hour window that resets in three hours.
 const busyHome = fs.mkdtempSync(path.join(os.tmpdir(), "pool-busy-"));
 const busyInstances = Object.fromEntries(
   [a, b].map((instanceId) => [
@@ -275,15 +274,14 @@ const sweepBusy = (
     );
   });
 
-it.effect("moves an account's newest running threads off it until its five-hour window fits", () =>
+it.effect("never moves a running thread because its account is projected past its room", () =>
   Effect.gen(function* () {
-    // 50% two hours in is 25 points an hour, past the 90% room in the 3 hours left; each move takes off one of
-    // its six sessions' share, about 4 an hour, so three must go.
+    // 50% two hours in is 25 points an hour, past the 90% room in the 3 hours left.
     const moved = yield* sweepBusy(
       [1, 2, 3, 4, 5, 6].map((ageHours) => ({ id: `thread:${ageHours}`, running: true, ageHours })),
       [],
     );
-    assert.deepEqual(moved, ["thread:1", "thread:2", "thread:3"]);
+    assert.deepEqual(moved, []);
   }),
 );
 
@@ -297,7 +295,7 @@ it.effect("moves an idle thread kept apart off the account it shares, never a ru
       ],
       ["thread:ltm", "thread:infra"],
     );
-    // B still runs past its room, so the worker leaves too; the running infra lead stays put.
-    assert.deepEqual(moved, ["thread:ltm", "thread:worker"]);
+    // The running infra lead stays put.
+    assert.deepEqual(moved, ["thread:ltm"]);
   }),
 );
