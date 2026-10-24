@@ -2307,7 +2307,7 @@ export function GeneralSettingsPanel() {
           serverScoped
           settingKeys={["compactIdleThreads"]}
           {...searchableSetting("compact-idle-threads")}
-          description="Compact long idle Claude threads just before their prompt cache expires, so coming back costs less."
+          description="Just before an idle Claude thread's prompt cache expires, compact it if it's long, or keep its cache warm with a one-word turn for up to 6 hours, so coming back costs less."
           resetAction={
             settings.compactIdleThreads !== DEFAULT_UNIFIED_SETTINGS.compactIdleThreads ? (
               <SettingResetButton

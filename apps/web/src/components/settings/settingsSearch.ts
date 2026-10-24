@@ -341,7 +341,9 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Compact idle Claude threads (beta)",
     to: "/settings/general",
     scope: "environment-defaults",
-    searchTerms: ["context compaction idle cache tokens usage summary beta experimental"],
+    searchTerms: [
+      "context compaction idle cache keep warm ping tokens usage summary beta experimental",
+    ],
   },
   {
     id: "auto-settle-merged-threads",

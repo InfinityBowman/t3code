@@ -2,6 +2,7 @@ import { applyThreadPullRequestLinkUpdate } from "@t3tools/shared/threadPullRequ
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
 import { makeThreadFind, findProjectedThreadItems } from "./ThreadFind.ts";
+import { isKeepWarmRun, KEEP_WARM_MESSAGE_ID_PREFIX } from "./IdleCompaction.ts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -1568,7 +1569,9 @@ export function threadShellFromProjection(
       (left, right) =>
         DateTime.toEpochMillis(right.updatedAt) - DateTime.toEpochMillis(left.updatedAt),
     );
-  const latestUserMessage = userMessages[0] ?? null;
+  // A keep-warm ping is nobody's message: the thread keeps its last-messaged time.
+  const latestUserMessage =
+    userMessages.find((message) => !message.id.startsWith(KEEP_WARM_MESSAGE_ID_PREFIX)) ?? null;
   const pendingBackgroundTasks = derivePendingBackgroundWork({
     latestRun,
     providerThreads: projection.providerThreads,
@@ -3812,6 +3815,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               latest.ordinal DESC, latest.run_id DESC
             LIMIT 1
           ) AND r.status = 'failed'
+            -- A failed keep-warm ping left nothing undone to resume or move.
+            AND json_extract(r.payload_json, '$.userMessageId') NOT LIKE ${KEEP_WARM_MESSAGE_ID_PREFIX + "%"}
           INNER JOIN orchestration_v2_projection_turn_items item ON item.turn_item_id = (
             SELECT error.turn_item_id FROM orchestration_v2_projection_turn_items error
             WHERE error.thread_id = t.thread_id AND error.run_id = r.run_id
@@ -3903,6 +3908,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           SELECT t.payload_json, (
             SELECT r.run_id FROM orchestration_v2_projection_runs r
             WHERE r.thread_id = t.thread_id AND r.status IN ('starting', 'running')
+              -- A keep-warm ping never makes an idle thread the pool's to move.
+              AND json_extract(r.payload_json, '$.userMessageId') NOT LIKE ${KEEP_WARM_MESSAGE_ID_PREFIX + "%"}
             ORDER BY r.ordinal DESC LIMIT 1
           ) AS running_run_id
           FROM orchestration_v2_projection_threads t
@@ -5789,6 +5796,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = t.thread_id
                   AND message.role = 'user'
+                  AND message.message_id NOT LIKE ${KEEP_WARM_MESSAGE_ID_PREFIX + "%"}
                 ORDER BY message.updated_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS latest_user_message_at,
@@ -6028,6 +6036,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 SELECT message.updated_at
                 FROM orchestration_v2_projection_messages message
                 WHERE message.thread_id = t.thread_id AND message.role = 'user'
+                  AND message.message_id NOT LIKE ${KEEP_WARM_MESSAGE_ID_PREFIX + "%"}
                 ORDER BY message.updated_at DESC, message.message_id DESC
                 LIMIT 1
               ) AS latest_user_message_at,
@@ -6737,7 +6746,11 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                   thread.archivedAt === null &&
                   thread.settledOverride !== "settled",
               )
-              .map(threadShellFromProjection)
+              .flatMap((projection) => {
+                const shell = threadShellFromProjection(projection);
+                const latest = projection.runs.find((run) => run.id === shell.latestRunId);
+                return latest !== undefined && isKeepWarmRun(latest) ? [] : [shell];
+              })
               .filter(
                 (thread) =>
                   thread.status === "failed" &&
@@ -6784,7 +6797,10 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               );
               if (!active) return [];
               const running = runs
-                .filter((run) => run.status === "starting" || run.status === "running")
+                .filter(
+                  (run) =>
+                    (run.status === "starting" || run.status === "running") && !isKeepWarmRun(run),
+                )
                 .toSorted((left, right) => right.ordinal - left.ordinal)[0];
               return [
                 {
