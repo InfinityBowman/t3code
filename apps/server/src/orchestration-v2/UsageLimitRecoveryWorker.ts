@@ -282,8 +282,8 @@ export const makeSweep = Effect.gen(function* () {
       }
       // An account whose use would pass its room before a window's reset, the five-hour one or the weekly,
       // hands its newest running threads, one by one until it fits, to accounts with room, so it never
-      // reaches its limit while another has room. The threads with the most context, and those kept
-      // apart, stay put; a blocked account is the limit moves' to handle.
+      // reaches its limit while another has room. Threads kept apart stay put; a blocked account is the
+      // limit moves' to handle.
       for (const instanceId of pool) {
         if (nowMs - (rebalancedAt.get(instanceId) ?? 0) < REBALANCE_COOLDOWN_MS) continue;
         const provider = providers.find((candidate) => candidate.instanceId === instanceId);

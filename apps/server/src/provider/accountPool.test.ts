@@ -15,6 +15,7 @@ import {
   makeUsageHistory,
   pickPoolAccount,
   poolAccountBlockedUntil,
+  poolAccountOverrun,
 } from "./accountPool.ts";
 
 const nowMs = Date.parse("2026-10-18T15:00:00.000Z");
@@ -92,6 +93,18 @@ describe("pickPoolAccount", () => {
       }),
     ).toBe(b);
     expect(pick([quietA, laterB])).toBe(a);
+  });
+
+  it("projects a weekly window at its average so far, not a busy few hours", () => {
+    // Oct 24: A at 65% after 117 hours, 51 to its reset, after a morning at 2 points an hour. Its average,
+    // 0.56 points an hour, ends it at 93%.
+    const history = makeUsageHistory();
+    const week = { ...weekly(59, "2026-10-20T18:00:00.000Z"), windowDurationMins: 7 * 24 * 60 };
+    history.record([account(a, [week], "2026-10-18T11:59:00.000Z")]);
+    const now = account(a, [{ ...week, usedPercent: 65 }]);
+    history.record([now]);
+    const overrun = poolAccountOverrun(now, model, nowMs, { sessions: new Map(), history }, 0);
+    expect(overrun).toBeCloseTo(65 + (65 / 117) * 51 - 95, 5);
   });
 
   it("lets a used-up model window bind only threads on that model", () => {

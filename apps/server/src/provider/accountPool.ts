@@ -181,7 +181,16 @@ export function poolAccountOverrun(
       window.resetsAt !== undefined
         ? (Date.parse(window.resetsAt) - nowMs) / 3_600_000
         : (window.windowDurationMins ?? 0) / 60;
-    const measured = load.history.perHour(provider.instanceId, window, nowMs);
+    // A weekly window burns at its average so far (over a day at least): a few busy hours projected across
+    // the nights to a reset days out would move threads off an account with plenty left.
+    const openedMs =
+      window.resetsAt !== undefined && window.windowDurationMins
+        ? Date.parse(window.resetsAt) - window.windowDurationMins * 60_000
+        : undefined;
+    const measured =
+      kind === "weekly" && openedMs !== undefined
+        ? window.usedPercent / Math.max((nowMs - openedMs) / 3_600_000, 24)
+        : load.history.perHour(provider.instanceId, window, nowMs);
     const floor = SESSION_BURN_PER_HOUR[kind];
     const burn = Math.max(measured ?? 0, sessions * floor);
     const perSession = Math.max(
