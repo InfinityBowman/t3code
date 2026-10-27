@@ -65,7 +65,7 @@ export function idleCompactionWindow(
   if (thread.settledAt !== null || thread.settledOverride === "settled") return null;
   if (thread.snoozedUntil != null && DateTime.toEpochMillis(thread.snoozedUntil) > nowMs)
     return null;
-  if (thread.lineage.relationshipToParent === "subagent") return null;
+  const delegated = thread.lineage.relationshipToParent === "subagent";
   const latestRun = runs.reduce<(typeof runs)[number] | null>(
     (latest, run) => (latest === null || run.ordinal > latest.ordinal ? run : latest),
     null,
@@ -117,6 +117,9 @@ export function idleCompactionWindow(
       turnItems,
       activeProviderThreadId: thread.activeProviderThreadId,
     }).length > 0;
+  // A delegated worker's last turn is its parent's result, so it is never compacted, and pinged only while a
+  // background job will wake it: a finished worker is rarely revisited.
+  if (delegated && !backgroundWork) return null;
   if (!backgroundWork && (usage?.usedTokens ?? 0) >= MIN_CONTEXT_TOKENS)
     return { action: "compact", runId: latestRun.id, startMs, endMs };
   const lastRealRun = runs

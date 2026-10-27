@@ -226,6 +226,26 @@ describe("keep-warm", () => {
     expect(idleCompactionWindow(waiting, NOW_MS)).toMatchObject({ action: "keep_warm" });
   });
 
+  it("pings a delegated worker only while a background job will wake it, and never compacts it", () => {
+    const worker = records(cache);
+    worker.thread = {
+      ...worker.thread,
+      lineage: {
+        rootThreadId: ThreadId.make("parent"),
+        parentThreadId: ThreadId.make("parent"),
+        relationshipToParent: "subagent",
+      },
+    };
+    expect(idleCompactionWindow(worker, NOW_MS)).toBeNull();
+    worker.providerThreads = [
+      {
+        ...worker.providerThreads[0]!,
+        pendingBackgroundTasks: [{ taskId: "watch-1", kind: "command" }],
+      },
+    ];
+    expect(idleCompactionWindow(worker, NOW_MS)).toMatchObject({ action: "keep_warm" });
+  });
+
   it("stops six hours after the last run that wasn't a ping", () => {
     // Pings every 58 minutes after a real run that ended at `at(0)`.
     const chain = (pings: number) => {
