@@ -44,7 +44,7 @@ import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
-import { pickPoolAccount, poolLoad } from "../provider/accountPool.ts";
+import { pickPoolAccount } from "../provider/accountPool.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
@@ -218,11 +218,11 @@ const make = Effect.gen(function* () {
   const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
   const preparationScope = yield* Scope.make("sequential");
 
-  // Pooled accounts are interchangeable: a new thread starts on the one with room, and a
+  // Pooled accounts are interchangeable: a new thread starts on the one picked, and a
   // retried launch keeps the account its accepted create already chose.
   const poolSelection = (selection: ModelSelection, existingThreadId: ThreadId | undefined) =>
     Effect.gen(function* () {
-      const { accountPool, providerInstances } = yield* serverSettings.getSettings;
+      const { accountPool } = yield* serverSettings.getSettings;
       if (!accountPool.includes(selection.instanceId)) return selection;
       if (existingThreadId !== undefined) {
         const shell = yield* threads.getThreadShell(existingThreadId);
@@ -232,7 +232,6 @@ const make = Effect.gen(function* () {
       const instanceId = pickPoolAccount({
         pool: accountPool,
         providers: yield* providerRegistry.getProviders,
-        load: poolLoad(accountPool, providerInstances, nowMs),
         model: selection.model,
         nowMs,
         fallback: true,

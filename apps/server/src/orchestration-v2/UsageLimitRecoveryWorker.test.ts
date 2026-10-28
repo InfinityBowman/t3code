@@ -274,17 +274,6 @@ const sweepBusy = (
     );
   });
 
-it.effect("never moves a running thread because its account is projected past its room", () =>
-  Effect.gen(function* () {
-    // 50% two hours in is 25 points an hour, past the 90% room in the 3 hours left.
-    const moved = yield* sweepBusy(
-      [1, 2, 3, 4, 5, 6].map((ageHours) => ({ id: `thread:${ageHours}`, running: true, ageHours })),
-      [],
-    );
-    assert.deepEqual(moved, []);
-  }),
-);
-
 it.effect("moves an idle thread kept apart off the account it shares, never a running one", () =>
   Effect.gen(function* () {
     const moved = yield* sweepBusy(

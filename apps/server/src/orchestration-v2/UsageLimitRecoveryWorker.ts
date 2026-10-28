@@ -14,7 +14,6 @@ import {
   ACCOUNT_MOVE_MIN_WAIT_MS,
   pickPoolAccount,
   poolAccountBlockedUntil,
-  poolLoad,
 } from "../provider/accountPool.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
@@ -177,12 +176,9 @@ export const makeSweep = Effect.gen(function* () {
     const moved = new Set<ThreadId>();
     if (pool.length > 0) {
       const providers = yield* poolSnapshots(pool, nowMs);
-      const load = poolLoad(pool, preferences.providerInstances, nowMs);
       const active = yield* projections.getActiveThreads({
         since: DateTime.subtract(now, { hours: 1 }),
       });
-      // Sessions this sweep's moves took off (negative) or put on each account.
-      const shift = new Map<ProviderInstanceId, number>();
       const placed = new Map<ThreadId, ProviderInstanceId>();
       const accountOf = (thread: (typeof active)[number]) =>
         placed.get(thread.id) ?? thread.providerInstanceId;
@@ -196,34 +192,29 @@ export const makeSweep = Effect.gen(function* () {
         pickPoolAccount({
           pool,
           providers,
-          load,
           model: thread.modelSelection.model,
           nowMs,
           exclude: [exclude, ...apartFrom(thread)],
-          added: shift,
         });
-      const move = (
+      const move = Effect.fn("move")(function* (
         thread: (typeof active)[number] | ProjectionStore.ProjectionLimitRecoveryCandidate,
         targetInstanceId: ProviderInstanceId,
         key: string,
         reason?: "nearlyFull" | "apart",
-      ) =>
-        Effect.gen(function* () {
-          yield* dispatchAll(
-            thread.id,
-            accountMoveCommands({
-              threadId: thread.id,
-              modelSelection: thread.modelSelection,
-              targetInstanceId,
-              key,
-              ...(reason === undefined ? {} : { reason }),
-            }),
-          );
-          moved.add(thread.id);
-          placed.set(thread.id, targetInstanceId);
-          shift.set(thread.providerInstanceId, (shift.get(thread.providerInstanceId) ?? 0) - 1);
-          shift.set(targetInstanceId, (shift.get(targetInstanceId) ?? 0) + 1);
-        });
+      ) {
+        yield* dispatchAll(
+          thread.id,
+          accountMoveCommands({
+            threadId: thread.id,
+            modelSelection: thread.modelSelection,
+            targetInstanceId,
+            key,
+            ...(reason === undefined ? {} : { reason }),
+          }),
+        );
+        moved.add(thread.id);
+        placed.set(thread.id, targetInstanceId);
+      });
       // A limit that lifts soon is waited out; a long one moves the thread to an account with room.
       const longLimit = (current: ProviderInstanceId, resetMs: number) =>
         pool.includes(current) && resetMs - nowMs > ACCOUNT_MOVE_MIN_WAIT_MS;
@@ -252,11 +243,9 @@ export const makeSweep = Effect.gen(function* () {
         const targetInstanceId = pickPoolAccount({
           pool,
           providers,
-          load,
           model: thread.modelSelection.model,
           nowMs,
           exclude: [thread.providerInstanceId, ...(listed ? apartFrom(listed) : [])],
-          added: shift,
         });
         if (targetInstanceId === undefined) continue;
         yield* move(thread, targetInstanceId, thread.latestRunId);
@@ -271,8 +260,7 @@ export const makeSweep = Effect.gen(function* () {
         if (targetInstanceId === undefined) continue;
         yield* move(thread, targetInstanceId, `idle:${nowMs}`, "apart");
       }
-      // Only a nearly used-up account moves threads between turns, so no turn is cut; a projection never moves
-      // one, it only places new threads.
+      // Only a nearly used-up account moves threads, between turns so no turn is cut; 95% only steers new ones.
       for (const thread of active) {
         if (thread.runningRunId !== null || moved.has(thread.id)) continue;
         const provider = providers.find((p) => p.instanceId === thread.providerInstanceId);
