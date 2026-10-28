@@ -1,5 +1,5 @@
 import * as Alchemy from "alchemy";
-import * as Axiom from "@alchemy.run/axiom";
+import * as Axiom from "alchemy/Axiom";
 import * as Output from "alchemy/Output";
 import * as Config from "effect/Config";
 import * as Effect from "effect/Effect";

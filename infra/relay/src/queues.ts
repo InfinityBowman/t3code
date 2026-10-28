@@ -1,4 +1,4 @@
-import * as Cloudflare from "@alchemy.run/cloudflare";
+import * as Cloudflare from "alchemy/Cloudflare";
 
 export const RelayApnsDeliveryDeadLetterQueue = Cloudflare.Queues.Queue(
   "RelayApnsDeliveryDeadLetterQueue",
