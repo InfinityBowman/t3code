@@ -10,6 +10,8 @@ const MIN_CONTEXT_TOKENS = COMPACTION_SUGGESTION_MIN_TOKENS;
 // Start this long before the cache expires: enough for the session to resume
 // and send the compaction while the cache is still warm.
 const LEAD_MS = 2 * 60_000;
+// The longest a request runs before its final usage arrives, when its start went unrecorded.
+const UNKNOWN_START_MS = 5 * 60_000;
 // A thread nobody has woken this long lets its cache lapse.
 const KEEP_WARM_MAX_IDLE_MS = 6 * 60 * 60_000;
 // A ping costs a tenth of the context per cache lifetime: worth it each hour, not every five minutes.
@@ -102,9 +104,15 @@ export function idleCompactionWindow(
     .map((turn) => turn.tokenUsage!)
     .toSorted((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0];
   // A request served fully from cache creates no cache entry and reports no
-  // TTL, but it still refreshes the cache. Treat it as unknown and skip.
+  // TTL, but it still refreshes the cache. Treat it as unknown and skip. Usage
+  // known only from the final snapshot has a TTL but no request start: it
+  // started at most this long before the snapshot.
   const endMs =
-    usage?.promptCacheExpiresAt === undefined ? Number.NaN : Date.parse(usage.promptCacheExpiresAt);
+    usage?.promptCacheExpiresAt !== undefined
+      ? Date.parse(usage.promptCacheExpiresAt)
+      : usage?.promptCacheTtlMs !== undefined
+        ? Date.parse(usage.updatedAt) + usage.promptCacheTtlMs - UNKNOWN_START_MS
+        : Number.NaN;
   if (!Number.isFinite(endMs) || nowMs >= endMs) return null;
   const startMs = endMs - LEAD_MS;
   // Background work reports into the next turn and compaction would swallow

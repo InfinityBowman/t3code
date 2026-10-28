@@ -211,6 +211,24 @@ describe("keep-warm", () => {
     expect(idleCompactionWindow(waiting, NOW_MS)).toMatchObject({ action: "keep_warm" });
   });
 
+  it("schedules from the final usage when the request's start went unrecorded", () => {
+    const snapshot = records({ usedTokens: 30_000 });
+    snapshot.providerTurns = [
+      {
+        ...snapshot.providerTurns[0]!,
+        tokenUsage: {
+          usedTokens: 30_000,
+          promptCacheTtlMs: 60 * MINUTE_MS,
+          updatedAt: DateTime.formatIso(at()),
+        },
+      },
+    ];
+    expect(idleCompactionWindow(snapshot, NOW_MS)).toMatchObject({
+      action: "keep_warm",
+      endMs: NOW_MS + 55 * MINUTE_MS,
+    });
+  });
+
   it("pings a delegated worker only while a background job will wake it, and never compacts it", () => {
     const worker = records(cache);
     worker.thread = {
