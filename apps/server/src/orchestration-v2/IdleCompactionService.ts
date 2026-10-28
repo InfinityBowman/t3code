@@ -1,6 +1,8 @@
 import {
   CommandId,
+  IDLE_COMPACTION_TEXT,
   MessageId,
+  resolveIdleCompaction,
   resolveProjectProviderInstanceEnabled,
   type OrchestrationV2Run,
   type RunId,
@@ -26,10 +28,11 @@ import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
 /**
- * Beta: when a Claude run completes, waits until shortly before its prompt
- * cache expires, then sends `/compact` to a long thread, or a keep-warm ping
- * to a shorter one or one waiting on background work, as a visible T3 Code
- * turn. Timers live in memory, so a server restart skips the ones still waiting.
+ * Beta: when a run completes on a Claude instance set to compact before the
+ * cache expires, waits until shortly before its prompt cache expires, then sends
+ * `/compact` to a long thread, or a keep-warm ping to a shorter one or one waiting
+ * on background work, as a visible T3 Code turn. Timers live in memory, so a
+ * server restart skips the ones still waiting.
  */
 export const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -42,7 +45,6 @@ export const make = Effect.gen(function* () {
       // Loops once after the wait: the thread may have moved on.
       while (true) {
         const current = yield* settings.getSettings;
-        if (!current.compactIdleThreads) return;
         const records = yield* projections.getThreadRecords(
           threadId,
           [
@@ -57,6 +59,8 @@ export const make = Effect.gen(function* () {
           { messageRunIds: [runId], turnItemStatuses: ["pending", "running", "waiting"] },
         );
         if (
+          resolveIdleCompaction(current, records.thread.providerInstanceId) !==
+            "beforeCacheExpires" ||
           !resolveProjectProviderInstanceEnabled(
             current,
             records.thread.projectId,
@@ -78,10 +82,11 @@ export const make = Effect.gen(function* () {
             commandId: CommandId.make(`server:idle-compact:${threadId}:${runId}`),
             messageId: MessageId.make(`idle-compact:${threadId}:${runId}`),
             threadId,
-            text: "/compact",
+            text: IDLE_COMPACTION_TEXT,
             attachments: [],
             createdBy: "agent",
             creationSource: "server",
+            idleCompaction: "beforeCacheExpires",
             dispatchMode: { type: "start_immediately" },
           });
           return;

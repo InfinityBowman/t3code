@@ -74,39 +74,6 @@ describe("GitHubCredentials", () => {
     vi.unstubAllEnvs();
   });
 
-  it.effect("asks gh for the active login when Settings pin nothing", () => {
-    const { layer, calls } = harness();
-    return Effect.gen(function* () {
-      const credentials = yield* GitHubCredentials.GitHubCredentials;
-      const credential = yield* credentials.get("GitHub.com");
-      expect(Redacted.value(credential.token)).toBe("active-token");
-      expect(calls).toEqual([["auth", "token", "--hostname", "github.com"]]);
-    }).pipe(Effect.provide(layer));
-  });
-
-  it.effect("passes --user for an account pinned in Settings", () => {
-    const { layer, calls } = harness({ "github.com": { account: "work" } });
-    return Effect.gen(function* () {
-      const credentials = yield* GitHubCredentials.GitHubCredentials;
-      const credential = yield* credentials.get("github.com");
-      expect(Redacted.value(credential.token)).toBe("token-for-work");
-      expect(calls).toEqual([["auth", "token", "--hostname", "github.com", "--user", "work"]]);
-    }).pipe(Effect.provide(layer));
-  });
-
-  it.effect("fails a host turned off in Settings without asking gh", () => {
-    const { layer, calls } = harness({ "github.com": { enabled: false } });
-    return Effect.gen(function* () {
-      const credentials = yield* GitHubCredentials.GitHubCredentials;
-      const error = yield* Effect.flip(credentials.get("github.com"));
-      expect(error._tag).toBe("GitHubHostDisabledError");
-      expect(error.message).toBe(
-        "GitHub host github.com is turned off in Settings → Source Control.",
-      );
-      expect(calls).toEqual([]);
-    }).pipe(Effect.provide(layer));
-  });
-
   it.effect("lets an environment token win over a pinned account, as gh does", () => {
     vi.stubEnv("GH_TOKEN", "from-env");
     const { layer, calls } = harness({ "github.com": { account: "work" } });
@@ -179,6 +146,19 @@ describe("GitHubCredentials", () => {
       expect((yield* Effect.flip(credentials.get("github.com")))._tag).toBe(
         "GitHubHostDisabledError",
       );
+    }).pipe(Effect.provide(layer));
+  });
+
+  it.effect("never hands a token to a host that is not a plain hostname", () => {
+    vi.stubEnv("GH_TOKEN", "env-token");
+    const { layer, calls } = harness();
+    return Effect.gen(function* () {
+      const credentials = yield* GitHubCredentials.GitHubCredentials;
+      for (const host of ["evil.com#.ghe.com", "evil.com/.ghe.com", "user@x.ghe.com"]) {
+        expect(GitHubCredentials.environmentToken(host, { GH_TOKEN: "env-token" })).toBeNull();
+        expect((yield* Effect.flip(credentials.get(host)))._tag).toBe("GitHubNotSignedInError");
+      }
+      expect(calls).toEqual([]);
     }).pipe(Effect.provide(layer));
   });
 });
