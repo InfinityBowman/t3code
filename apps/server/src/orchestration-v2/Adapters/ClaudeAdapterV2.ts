@@ -1000,7 +1000,10 @@ export const layerQueryRunner: Layer.Layer<
           const keeperSpawn =
             keeperSocket === undefined
               ? undefined
-              : spawnThroughClaudeKeeper(keeperSocket, queryOptions.resume ?? queryOptions.sessionId);
+              : spawnThroughClaudeKeeper(
+                  keeperSocket,
+                  queryOptions.resume ?? queryOptions.sessionId,
+                );
           const spawnProcess =
             options.spawnClaudeCodeProcess ??
             ((spawnOptions: ClaudeSpawnOptions) => {

@@ -261,7 +261,7 @@ export const make = Effect.gen(function* () {
                   return item === undefined || since === undefined ? undefined : { item, since };
                 }),
                 Effect.catchTags({
-                  ProjectionStoreThreadNotFoundError: () => Effect.succeed(undefined),
+                  ProjectionStoreThreadNotFoundError: () => Effect.void,
                 }),
                 Effect.mapError(
                   (cause) =>

@@ -25,7 +25,7 @@ import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
-import { ProjectToolkit } from "./tools.ts";
+import { ProjectToolkit, SessionImportToolkit } from "./tools.ts";
 
 function projectFailure(error: Project.ProjectServiceError) {
   if (error._tag === "ProjectOperationError") return unavailable();
@@ -336,19 +336,6 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
         .pipe(Effect.mapError(projectFailure));
     }),
   ),
-  t3_project_import_sessions: McpToolAccess.writesEnvironment((input) =>
-    Effect.gen(function* () {
-      const importer = yield* AgentSessionImporter.AgentSessionImporter;
-      return yield* importer
-        .importRecentAgentThreads(input)
-        .pipe(
-          Effect.mapError(
-            (error) =>
-              new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
-          ),
-        );
-    }),
-  ),
   t3_project_clone: McpToolAccess.writesEnvironment(
     (input) =>
       Effect.gen(function* () {
@@ -365,5 +352,21 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
       }),
     // An existing destination is never adopted.
     { linkedCallers: "allowed" },
+  ),
+});
+
+export const layerSessionImport = McpToolAccess.toLayer(SessionImportToolkit, {
+  t3_project_import_sessions: McpToolAccess.writesEnvironment((input) =>
+    Effect.gen(function* () {
+      const importer = yield* AgentSessionImporter.AgentSessionImporter;
+      return yield* importer
+        .importRecentAgentThreads(input)
+        .pipe(
+          Effect.mapError(
+            (error) =>
+              new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
+          ),
+        );
+    }),
   ),
 });

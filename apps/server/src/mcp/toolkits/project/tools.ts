@@ -194,5 +194,7 @@ export const ProjectToolkit = Toolkit.make(
   ProjectUpdateTool,
   ProjectDeleteTool,
   ProjectCloneTool,
-  ProjectImportSessionsTool,
 );
+
+// Its own toolkit, registered only by the server itself, so tests building the project tools never need the importer.
+export const SessionImportToolkit = Toolkit.make(ProjectImportSessionsTool);
