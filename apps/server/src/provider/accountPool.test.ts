@@ -29,7 +29,7 @@ const account = (instanceId: ProviderInstanceId, weeklyUsed: number, weeklyReset
   }) as unknown as ServerProvider;
 
 describe("pickPoolAccount", () => {
-  it("picks the account resetting soonest unless it is at 95%", () => {
+  it("picks the account resetting soonest unless it is at 90%", () => {
     const pick = (aUsed: number) =>
       pickPoolAccount({
         pool: [a, b],
@@ -40,7 +40,7 @@ describe("pickPoolAccount", () => {
         model,
         nowMs,
       });
-    expect(pick(94)).toBe(a);
-    expect(pick(95)).toBe(b);
+    expect(pick(89)).toBe(a);
+    expect(pick(90)).toBe(b);
   });
 });

@@ -5,7 +5,7 @@ import type {
 } from "@t3tools/contracts";
 
 // An account with any window at this use is skipped while another has room.
-const FULL_PERCENT = 95;
+const FULL_PERCENT = 90;
 
 /** A limit lifting sooner than this is waited out: a move costs the thread its prompt cache. */
 export const ACCOUNT_MOVE_MIN_WAIT_MS = 30 * 60 * 1000;
@@ -50,9 +50,9 @@ function servable(provider: ServerProvider | undefined): provider is ServerProvi
 }
 
 /**
- * The pooled account a thread on `model` should go to: of those with every window under 95%, the one whose
+ * The pooled account a thread on `model` should go to: of those with every window under 90%, the one whose
  * weekly window resets soonest, so budget about to expire goes first. With `fallback`, when none is under
- * 95%, the one whose fullest window is lowest; otherwise undefined.
+ * 90%, the one whose fullest window is lowest; otherwise undefined.
  */
 export function pickPoolAccount(input: {
   readonly pool: ReadonlyArray<ProviderInstanceId>;
