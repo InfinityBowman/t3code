@@ -1946,6 +1946,8 @@ const decodeClaudeTranscriptLine = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Struct({ type: Schema.String })),
 );
 
+const decodeUnknownJsonLine = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
+
 const isClaudeConversationLine = (line: string): boolean =>
   Option.match(decodeClaudeTranscriptLine(line), {
     onNone: () => false,
@@ -4642,6 +4644,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         });
         const openedNativeThreads = yield* Ref.make(new Set<string>());
         const pdfBudgets = new Map<string, ReturnType<typeof makeClaudeAttachmentBudget>>();
+        // Sessions the keeper held through a restart, until their first continuation checks for a turn in flight.
+        const keeperReattachedNativeThreads = new Set<string>();
         const latestPlanByKind = yield* Ref.make(new Map<string, OrchestrationV2PlanArtifact>());
         // Claude 5 task tools edit one list per native session, across turns.
         const taskListsByNativeThread = yield* Ref.make(
@@ -10029,6 +10033,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
           if (yield* Effect.promise(() => takeClaudeKeeperReattach(nativeThreadId))) {
             // The keeper kept this session's process through a server restart, and with it the background work
             // and crons its provider thread last listed.
+            keeperReattachedNativeThreads.add(nativeThreadId);
             yield* replacePendingBackgroundTasks(
               nativeThreadId,
               turnInput.providerThread.pendingBackgroundTasks ?? [],
@@ -10313,6 +10318,13 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               );
               return;
             }
+            // A turn the keeper carried through the restart may still be running. Its later frames and result settle
+            // this continuation, which otherwise ends at once and tells a delegating parent its task is done.
+            const reattachedMidTurn =
+              keeperReattachedNativeThreads.delete(nativeThreadId) &&
+              (yield* isClaudeTranscriptMidTurn(nativeThreadId).pipe(
+                Effect.orElseSucceed(() => false),
+              ));
             // Transcript reads suspend replay; hold SDK frames until the buffer is applied to preserve order.
             yield* sdkMessageLock.withPermits(1)(
               Effect.gen(function* () {
@@ -10333,6 +10345,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   return updated;
                 });
                 if (drained.length === 0) {
+                  if (reattachedMidTurn) return;
                   const completedAt = yield* DateTime.now;
                   yield* finalizeActiveTurn({ context, status: "completed", completedAt });
                   return;
@@ -10736,16 +10749,59 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
         });
         yield* Effect.addFinalizer(() => closeSession());
 
+        const claudeProjectsDir = Effect.gen(function* () {
+          const configuredDir = adapterOptions.environment.CLAUDE_CONFIG_DIR?.trim() ?? "";
+          return path.join(
+            configuredDir.length > 0
+              ? path.resolve(session.cwd, configuredDir)
+              : path.join(yield* HostProcess.HomeDirectory, ".claude"),
+            "projects",
+          );
+        });
+
+        // Mid-turn, the transcript's last exchange is a tool call or a tool's result: the next reply is still coming.
+        // Text alone is left out, since an interrupt ends a turn on a user line too.
+        const isClaudeTranscriptMidTurn = Effect.fn("ClaudeAdapterV2.isClaudeTranscriptMidTurn")(
+          function* (nativeThreadId: string) {
+            const projectsDir = yield* claudeProjectsDir;
+            for (const project of yield* fileSystem.readDirectory(projectsDir)) {
+              const transcriptPath = path.join(projectsDir, project, `${nativeThreadId}.jsonl`);
+              const size = yield* fileSystem.stat(transcriptPath).pipe(
+                Effect.map((info) => Number(info.size)),
+                Effect.orElseSucceed(() => 0),
+              );
+              if (size === 0) continue;
+              const start = Math.max(0, size - 256 * 1024);
+              const bytes = yield* Effect.scoped(
+                Effect.gen(function* () {
+                  const handle = yield* fileSystem.open(transcriptPath, { flag: "r" });
+                  yield* handle.seek(BigInt(start), "start");
+                  return yield* handle.readAlloc(size - start);
+                }),
+              );
+              if (Option.isNone(bytes)) return false;
+              const lines = new TextDecoder().decode(bytes.value).split("\n");
+              for (const line of lines.slice(start > 0 ? 1 : 0).toReversed()) {
+                if (!isClaudeConversationLine(line)) continue;
+                const entry = Option.getOrNull(decodeUnknownJsonLine(line));
+                if (field(entry, "isMeta") === true) continue;
+                if (field(entry, "type") === "assistant") return !isClaudeTranscriptTurnEnd(entry);
+                const content = field(field(entry, "message"), "content");
+                return (
+                  Array.isArray(content) &&
+                  content.some((block) => field(block, "type") === "tool_result")
+                );
+              }
+              return false;
+            }
+            return false;
+          },
+        );
+
         // Metadata-only transcripts cannot be resumed or recreated; fail resumeThread to trigger a fresh session and handoff.
         const hasEmptyClaudeTranscript = Effect.fn("ClaudeAdapterV2.hasEmptyClaudeTranscript")(
           function* (nativeThreadId: string) {
-            const configuredDir = adapterOptions.environment.CLAUDE_CONFIG_DIR?.trim() ?? "";
-            const projectsDir = path.join(
-              configuredDir.length > 0
-                ? path.resolve(session.cwd, configuredDir)
-                : path.join(yield* HostProcess.HomeDirectory, ".claude"),
-              "projects",
-            );
+            const projectsDir = yield* claudeProjectsDir;
             // Any message in any transcript copy means Claude may still resume it.
             let found = false;
             for (const project of yield* fileSystem.readDirectory(projectsDir)) {
