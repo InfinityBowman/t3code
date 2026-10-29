@@ -1216,8 +1216,8 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   /**
-   * Threads that never share a pooled account, so one account's limit never stops them all: moves never
-   * put one beside another, and one found beside another moves while it's idle.
+   * Threads kept on separate pooled accounts, so one account's limit never stops them all: a move puts one
+   * beside another only when no other account has room, and one found beside another moves while it's idle.
    */
   accountPoolApart: Schema.Array(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   snoozePresets: SnoozePresetSettings.pipe(

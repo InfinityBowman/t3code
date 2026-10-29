@@ -59,6 +59,8 @@ const sweepOnce = (input: {
   readonly aUsed?: number;
   readonly running: boolean;
   readonly failed: boolean;
+  // A thread kept apart from this one, on B.
+  readonly apartOnB?: boolean;
 }) =>
   Effect.gen(function* () {
     yield* TestClock.setTime(now);
@@ -80,7 +82,11 @@ const sweepOnce = (input: {
       snoozedUntil: null,
     } as unknown as ProjectionStore.ProjectionLimitRecoveryCandidate;
     const layer = Layer.mergeAll(
-      ServerSettings.layerTest({ accountPool: [a, b], providerInstances }),
+      ServerSettings.layerTest({
+        accountPool: [a, b],
+        accountPoolApart: input.apartOnB ? [threadId, ThreadId.make("thread:apart")] : [],
+        providerInstances,
+      }),
       Layer.mock(ProviderRegistry.ProviderRegistry)({
         getProviders: Effect.succeed([
           account(a, input.aUsed ?? 100, input.aResetsAt),
@@ -97,6 +103,17 @@ const sweepOnce = (input: {
               createdAt: DateTime.makeUnsafe(now - 3_600_000),
               runningRunId: input.running ? runId : null,
             },
+            ...(input.apartOnB
+              ? [
+                  {
+                    id: ThreadId.make("thread:apart"),
+                    providerInstanceId: b,
+                    modelSelection: { instanceId: b, model: "claude-opus-5-5" },
+                    createdAt: DateTime.makeUnsafe(now - 3_600_000),
+                    runningRunId: RunId.make("run:apart"),
+                  },
+                ]
+              : []),
           ]),
         getLimitRecoveryCandidates: () => Effect.succeed(input.failed ? [candidate] : []),
       }),
@@ -133,6 +150,19 @@ it.effect("moves a turn held by a used-up account to the account with room", () 
   }),
 );
 
+it.effect("shares an account with a thread kept apart when no other account has room", () =>
+  Effect.gen(function* () {
+    const dispatched = yield* sweepOnce({
+      aResetsAt: "2026-10-19T19:00:00.000Z",
+      running: true,
+      failed: false,
+      apartOnB: true,
+    });
+    const [switched] = dispatched;
+    assert.equal(switched?.type === "provider.switch" && switched.modelSelection.instanceId, b);
+  }),
+);
+
 it.effect("moves a thread whose turn failed on a long limit and starts it again", () =>
   Effect.gen(function* () {
     const dispatched = yield* sweepOnce({
@@ -163,7 +193,7 @@ it.effect("moves a thread off a nearly used-up account between turns, never cutt
     const at = (aUsed: number, running: boolean) =>
       sweepOnce({ aResetsAt: "2026-10-19T19:00:00.000Z", aUsed, running, failed: false });
     assert.deepEqual(yield* at(99, true), []);
-    // 97% would pass the 95% room by the reset, but a projection never moves a thread.
+    // 97% would pass the 90% room by the reset, but a projection never moves a thread.
     assert.deepEqual(yield* at(97, false), []);
     const [switched, message] = yield* at(99, false);
     assert.equal(switched?.type === "provider.switch" && switched.modelSelection.instanceId, b);

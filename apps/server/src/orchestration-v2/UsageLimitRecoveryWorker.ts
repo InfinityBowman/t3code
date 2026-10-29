@@ -188,14 +188,20 @@ export const makeSweep = Effect.gen(function* () {
         apart.has(thread.id)
           ? active.filter((other) => other.id !== thread.id && apart.has(other.id)).map(accountOf)
           : [];
+      const pickFor = (
+        model: string,
+        exclude: ProviderInstanceId,
+        apartAccounts: ReadonlyArray<ProviderInstanceId>,
+      ) => pickPoolAccount({ pool, providers, model, nowMs, exclude: [exclude, ...apartAccounts] });
+      // A thread off a used-up account shares one with a thread kept apart from it when no other
+      // account has room: sharing beats waiting out the reset.
+      const pickOff = (
+        model: string,
+        exclude: ProviderInstanceId,
+        apartAccounts: ReadonlyArray<ProviderInstanceId>,
+      ) => pickFor(model, exclude, apartAccounts) ?? pickFor(model, exclude, []);
       const pick = (thread: (typeof active)[number], exclude: ProviderInstanceId) =>
-        pickPoolAccount({
-          pool,
-          providers,
-          model: thread.modelSelection.model,
-          nowMs,
-          exclude: [exclude, ...apartFrom(thread)],
-        });
+        pickOff(thread.modelSelection.model, exclude, apartFrom(thread));
       const move = Effect.fn("move")(function* (
         thread: (typeof active)[number] | ProjectionStore.ProjectionLimitRecoveryCandidate,
         targetInstanceId: ProviderInstanceId,
@@ -240,13 +246,11 @@ export const makeSweep = Effect.gen(function* () {
         if (moved.has(thread.id) || !thread.latestRunId || !thread.usageLimitResetAt) continue;
         if (!longLimit(thread.providerInstanceId, Date.parse(thread.usageLimitResetAt))) continue;
         const listed = active.find((candidate) => candidate.id === thread.id);
-        const targetInstanceId = pickPoolAccount({
-          pool,
-          providers,
-          model: thread.modelSelection.model,
-          nowMs,
-          exclude: [thread.providerInstanceId, ...(listed ? apartFrom(listed) : [])],
-        });
+        const targetInstanceId = pickOff(
+          thread.modelSelection.model,
+          thread.providerInstanceId,
+          listed ? apartFrom(listed) : [],
+        );
         if (targetInstanceId === undefined) continue;
         yield* move(thread, targetInstanceId, thread.latestRunId);
       }
@@ -255,12 +259,17 @@ export const makeSweep = Effect.gen(function* () {
       for (const thread of active) {
         if (!apart.has(thread.id) || thread.runningRunId !== null || moved.has(thread.id)) continue;
         if (!pool.includes(thread.providerInstanceId)) continue;
-        if (!apartFrom(thread).includes(accountOf(thread))) continue;
-        const targetInstanceId = pick(thread, thread.providerInstanceId);
+        const apartAccounts = apartFrom(thread);
+        if (!apartAccounts.includes(accountOf(thread))) continue;
+        const targetInstanceId = pickFor(
+          thread.modelSelection.model,
+          thread.providerInstanceId,
+          apartAccounts,
+        );
         if (targetInstanceId === undefined) continue;
         yield* move(thread, targetInstanceId, `idle:${nowMs}`, "apart");
       }
-      // Only a nearly used-up account moves threads, between turns so no turn is cut; 95% only steers new ones.
+      // Only a nearly used-up account moves threads, between turns so no turn is cut; 90% only steers new ones.
       for (const thread of active) {
         if (thread.runningRunId !== null || moved.has(thread.id)) continue;
         const provider = providers.find((p) => p.instanceId === thread.providerInstanceId);
