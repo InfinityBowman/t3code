@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - empty temporary Claude homes for the session count.
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -37,13 +37,13 @@ const threadId = ThreadId.make("thread:limited");
 const runId = RunId.make("run:limited");
 const modelSelection = { instanceId: a, model: "claude-opus-5-5" };
 // Empty homes, so the session counts never read this machine's transcripts.
-const home = fs.mkdtempSync(path.join(os.tmpdir(), "pool-sweep-"));
+const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "pool-sweep-"));
 const providerInstances = Object.fromEntries(
   [a, b].map((instanceId) => [
     instanceId,
     {
       driver: ProviderDriverKind.make("claudeAgent"),
-      config: { homePath: path.join(home, instanceId) },
+      config: { homePath: NodePath.join(home, instanceId) },
     },
   ]),
 );
@@ -133,7 +133,10 @@ const sweepOnce = (input: {
           }),
       }),
     );
-    const sweep = yield* UsageLimitRecoveryWorker.makeSweep.pipe(Effect.provide(layer), Effect.scoped);
+    const sweep = yield* UsageLimitRecoveryWorker.makeSweep.pipe(
+      Effect.provide(layer),
+      Effect.scoped,
+    );
     yield* sweep().pipe(Effect.provide(layer));
     return dispatched;
   });
@@ -212,21 +215,21 @@ it.effect("moves a thread off a nearly used-up account between turns, never cutt
 );
 
 // B holds six running threads and sits at 50% of a five-hour window that resets in three hours.
-const busyHome = fs.mkdtempSync(path.join(os.tmpdir(), "pool-busy-"));
+const busyHome = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "pool-busy-"));
 const busyInstances = Object.fromEntries(
   [a, b].map((instanceId) => [
     instanceId,
     {
       driver: ProviderDriverKind.make("claudeAgent"),
-      config: { homePath: path.join(busyHome, instanceId) },
+      config: { homePath: NodePath.join(busyHome, instanceId) },
     },
   ]),
 );
-fs.mkdirSync(path.join(busyHome, b, "projects", "repo"), { recursive: true });
+NodeFS.mkdirSync(NodePath.join(busyHome, b, "projects", "repo"), { recursive: true });
 for (let index = 0; index < 6; index++) {
-  const transcript = path.join(busyHome, b, "projects", "repo", `${index}.jsonl`);
-  fs.writeFileSync(transcript, "{}\n");
-  fs.utimesSync(transcript, (now - 60_000) / 1000, (now - 60_000) / 1000);
+  const transcript = NodePath.join(busyHome, b, "projects", "repo", `${index}.jsonl`);
+  NodeFS.writeFileSync(transcript, "{}\n");
+  NodeFS.utimesSync(transcript, (now - 60_000) / 1000, (now - 60_000) / 1000);
 }
 const withWindows = (instanceId: ProviderInstanceId, windows: ReadonlyArray<unknown>) =>
   ({
@@ -305,7 +308,10 @@ const sweepBusy = (
           }),
       }),
     );
-    const sweep = yield* UsageLimitRecoveryWorker.makeSweep.pipe(Effect.provide(layer), Effect.scoped);
+    const sweep = yield* UsageLimitRecoveryWorker.makeSweep.pipe(
+      Effect.provide(layer),
+      Effect.scoped,
+    );
     yield* sweep().pipe(Effect.provide(layer));
     return dispatched.flatMap((command) =>
       command.type === "provider.switch" ? [command.threadId] : [],
@@ -390,6 +396,8 @@ const failedThread = (failedAgoMs: number, resetAgoMs: number) => {
   const failedAt = DateTime.makeUnsafe(nowMs - failedAgoMs);
   const candidate: ProjectionStore.ProjectionLimitRecoveryCandidate = {
     id: ThreadId.make("thread:limited"),
+    providerInstanceId: a,
+    modelSelection,
     status: "failed",
     lastErrorClass: "usage_limit",
     usageLimitResetAt: DateTime.formatIso(DateTime.makeUnsafe(nowMs - resetAgoMs)),

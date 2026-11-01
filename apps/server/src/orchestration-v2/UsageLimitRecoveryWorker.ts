@@ -5,7 +5,6 @@ import {
   type OrchestrationV2Command,
   type OrchestrationV2DomainEvent,
   type ProviderInstanceId,
-  type RunId,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -48,7 +47,7 @@ const MOVE_AFTER =
  * holds and hands the thread's context to the new one; the queued message starts the next turn
  * there as soon as no turn is active.
  */
-export function accountMoveCommands(input: {
+function accountMoveCommands(input: {
   readonly threadId: ThreadId;
   readonly modelSelection: ModelSelection;
   readonly targetInstanceId: ProviderInstanceId;

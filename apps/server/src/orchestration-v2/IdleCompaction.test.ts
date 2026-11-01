@@ -21,6 +21,7 @@ import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 import * as TestClock from "effect/testing/TestClock";
 
+import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as IdleCompactionService from "./IdleCompactionService.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -385,6 +386,7 @@ describe("IdleCompactionService", () => {
             },
           });
           const dependencies = Layer.mergeAll(
+            Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
             Layer.mock(Orchestrator.OrchestratorV2)({
               streamDomainEvents: Stream.make({
                 id: EventId.make("idle-completed"),

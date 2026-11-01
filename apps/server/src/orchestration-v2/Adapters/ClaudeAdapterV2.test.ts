@@ -5057,7 +5057,8 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           { model: "claude-sonnet-4-6" },
           { effortLevel: "high", fastMode: null, ultracode: null },
           { model: "claude-opus-5-5" },
-          { effortLevel: "medium", fastMode: false, ultracode: null },
+          // The fork defaults every Claude model to High effort (ClaudeModelCatalog).
+          { effortLevel: "high", fastMode: false, ultracode: null },
         ]);
       }).pipe(
         Effect.provide(
