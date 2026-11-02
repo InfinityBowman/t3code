@@ -2,6 +2,7 @@ import { isListedThreadLineage, type OrchestrationV2ThreadProjection } from "@t3
 import { COMPACTION_SUGGESTION_MIN_TOKENS } from "@t3tools/shared/claudeCompaction";
 import { derivePendingBackgroundWork } from "@t3tools/shared/orchestrationV2PendingBackgroundWork";
 import * as DateTime from "effect/DateTime";
+import * as Predicate from "effect/Predicate";
 
 // Claude Code's idleCompaction defaults to 200K and won't go below 100K. Below
 // that a cold re-read is cheap, so compacting mostly loses context for little
@@ -25,6 +26,33 @@ export const KEEP_WARM_MESSAGE_ID_PREFIX = "keep-warm:";
 
 export function isKeepWarmRun(run: { readonly userMessageId: string }): boolean {
   return run.userMessageId.startsWith(KEEP_WARM_MESSAGE_ID_PREFIX);
+}
+
+/** The thread's latest run that wasn't a keep-warm ping. */
+export function lastRealRun<
+  Run extends { readonly ordinal: number; readonly userMessageId: string },
+>(runs: ReadonlyArray<Run>): Run | null {
+  return runs
+    .filter((run) => !isKeepWarmRun(run))
+    .reduce<Run | null>(
+      (latest, run) => (latest === null || run.ordinal > latest.ordinal ? run : latest),
+      null,
+    );
+}
+
+// Whether a run left Claude a turn of its own to come (a cron or a scheduled wakeup it didn't cancel). Claude
+// fires these itself, so the thread lists no background work, but the next turn re-reads the whole context.
+function scheduledOwnTurn(turnItems: IdleCompactionRecords["turnItems"], runId: string): boolean {
+  let scheduled = false;
+  for (const item of turnItems.toSorted((left, right) => left.ordinal - right.ordinal)) {
+    if (item.type !== "dynamic_tool" || item.runId !== runId || item.status !== "completed")
+      continue;
+    if (item.toolName === "CronCreate") scheduled = true;
+    else if (item.toolName === "CronDelete") scheduled = false;
+    else if (item.toolName === "ScheduleWakeup")
+      scheduled = !(Predicate.isObject(item.input) && Reflect.get(item.input, "stop") === true);
+  }
+  return scheduled;
 }
 
 export type IdleCompactionRecords = Pick<
@@ -127,18 +155,14 @@ export function idleCompactionWindow(
       turnItems,
       activeProviderThreadId: thread.activeProviderThreadId,
     }).length > 0;
+  const real = lastRealRun(runs);
   // A delegated worker's last turn is its parent's result, so it is never compacted, and pinged only while a
-  // background job will wake it: a finished worker is rarely revisited.
-  if (delegated && !backgroundWork) return null;
-  if (!backgroundWork && (usage?.usedTokens ?? 0) >= MIN_CONTEXT_TOKENS)
+  // background job or a turn it scheduled will wake it: a finished worker is rarely revisited.
+  if (delegated && !backgroundWork && !(real !== null && scheduledOwnTurn(turnItems, real.id)))
+    return null;
+  if (!delegated && !backgroundWork && (usage?.usedTokens ?? 0) >= MIN_CONTEXT_TOKENS)
     return { action: "compact", runId: latestRun.id, startMs, endMs };
-  const lastRealRun = runs
-    .filter((run) => !isKeepWarmRun(run))
-    .reduce<(typeof runs)[number] | null>(
-      (latest, run) => (latest === null || run.ordinal > latest.ordinal ? run : latest),
-      null,
-    );
-  const idleSince = lastRealRun?.completedAt ?? lastRealRun?.requestedAt;
+  const idleSince = real?.completedAt ?? real?.requestedAt;
   if (
     idleSince === undefined ||
     startMs - DateTime.toEpochMillis(idleSince) >= KEEP_WARM_MAX_IDLE_MS ||

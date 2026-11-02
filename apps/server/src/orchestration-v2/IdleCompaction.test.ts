@@ -251,7 +251,7 @@ describe("keep-warm", () => {
     });
   });
 
-  it("pings a delegated worker only while a background job will wake it, and never compacts it", () => {
+  it("pings a delegated worker only while a background job or its own schedule will wake it, and never compacts it", () => {
     const worker = records(cache);
     worker.thread = {
       ...worker.thread,
@@ -262,6 +262,34 @@ describe("keep-warm", () => {
       },
     };
     expect(idleCompactionWindow(worker, NOW_MS)).toBeNull();
+    // A cron or wakeup Claude set for itself wakes it too, even past 200k, until it cancels it.
+    const tool = (ordinal: number, toolName: string, input: unknown = {}) => ({
+      id: `tool-${ordinal}`,
+      threadId,
+      runId,
+      nodeId: NodeId.make(`tool-${ordinal}`),
+      providerThreadId,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal,
+      status: "completed" as const,
+      title: null,
+      startedAt: at(),
+      completedAt: at(),
+      updatedAt: at(),
+      type: "dynamic_tool" as const,
+      toolName,
+      input,
+    });
+    const scheduled = (...items: Array<ReturnType<typeof tool>>) =>
+      idleCompactionWindow({ ...worker, turnItems: items as never }, NOW_MS);
+    expect(scheduled(tool(1, "CronCreate"))).toMatchObject({ action: "keep_warm" });
+    expect(scheduled(tool(1, "ScheduleWakeup", { delaySeconds: 7200 }))).toMatchObject({
+      action: "keep_warm",
+    });
+    expect(scheduled(tool(1, "CronCreate"), tool(2, "CronDelete"))).toBeNull();
+    expect(scheduled(tool(1, "ScheduleWakeup", { stop: true }))).toBeNull();
     worker.providerThreads = [
       {
         ...worker.providerThreads[0]!,

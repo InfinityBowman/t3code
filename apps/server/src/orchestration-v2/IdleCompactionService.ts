@@ -23,16 +23,15 @@ import {
   isKeepWarmRun,
   KEEP_WARM_MESSAGE_ID_PREFIX,
   KEEP_WARM_TEXT,
+  lastRealRun,
 } from "./IdleCompaction.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
 /**
- * Beta: when a run completes on a Claude instance set to compact before the
- * cache expires, waits until shortly before its prompt cache expires, then sends
- * `/compact` to a long thread, or a keep-warm ping to a shorter one or one waiting
- * on background work, as a visible T3 Code turn. Timers live in memory, so a
- * server restart skips the ones still waiting.
+ * Beta: shortly before an idle Claude thread's prompt cache expires, sends `/compact` or a keep-warm
+ * ping (IdleCompaction.ts decides which) as a visible turn. Timers live in memory, so a server
+ * restart skips the ones still waiting.
  */
 export const make = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -82,8 +81,21 @@ export const make = Effect.gen(function* () {
           )
         )
           return;
+        // A delegated worker's last real run's finished tool calls show whether it scheduled a turn of its own.
+        const real = lastRealRun(records.runs);
+        const scheduling =
+          real === null || records.thread.lineage.relationshipToParent !== "subagent"
+            ? []
+            : (yield* projections.getThreadRecords(threadId, ["turnItems"], {
+                turnItemRunIds: [real.id],
+                turnItemTypes: ["dynamic_tool"],
+                turnItemStatuses: ["completed"],
+              })).turnItems;
         const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
-        const window = idleCompactionWindow(records, nowMs);
+        const window = idleCompactionWindow(
+          { ...records, turnItems: [...records.turnItems, ...scheduling] },
+          nowMs,
+        );
         if (window?.runId !== runId) return;
         if (nowMs < window.startMs) {
           yield* Effect.sleep(Duration.millis(window.startMs - nowMs));
