@@ -98,10 +98,13 @@ export function idleCompactionWindow(
   const delegated = thread.lineage.relationshipToParent === "subagent";
   // A side chat is never compacted or pinged: it rides beside its main thread.
   if (!delegated && !isListedThreadLineage(thread.lineage)) return null;
-  const latestRun = runs.reduce<(typeof runs)[number] | null>(
-    (latest, run) => (latest === null || run.ordinal > latest.ordinal ? run : latest),
-    null,
-  );
+  // A removed or steered queued message leaves a cancelled run that never started.
+  const latestRun = runs
+    .filter((run) => run.status !== "cancelled" || run.startedAt !== null)
+    .reduce<(typeof runs)[number] | null>(
+      (latest, run) => (latest === null || run.ordinal > latest.ordinal ? run : latest),
+      null,
+    );
   if (latestRun?.status !== "completed" || latestRun.completedAt === null) return null;
   const message = messages.find((candidate) => candidate.id === latestRun.userMessageId);
   // Never follow a compaction: one idle spell compacts at most once, and its
