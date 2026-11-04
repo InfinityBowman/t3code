@@ -221,8 +221,8 @@ const make = Effect.gen(function* () {
 
   // Pooled accounts are interchangeable: a new thread starts on the one picked, and a
   // retried launch keeps the account its accepted create already chose.
-  const poolSelection = (selection: ModelSelection, existingThreadId: ThreadId | undefined) =>
-    Effect.gen(function* () {
+  const poolSelection = Effect.fn("ThreadLaunchService.poolSelection")(
+    function* (selection: ModelSelection, existingThreadId: ThreadId | undefined) {
       const { accountPool } = yield* serverSettings.getSettings;
       if (!accountPool.includes(selection.instanceId)) return selection;
       if (existingThreadId !== undefined) {
@@ -238,14 +238,17 @@ const make = Effect.gen(function* () {
         fallback: true,
       });
       return instanceId === undefined ? selection : { ...selection, instanceId };
-    }).pipe(
-      // Routing never blocks a launch: on any failure the thread starts where it was asked to.
-      Effect.catchCause((cause) =>
-        Effect.logWarning("thread-launch.account-pool.failed", { cause }).pipe(
-          Effect.as(selection),
+    },
+    // Routing never blocks a launch: on any failure the thread starts where it was asked to.
+    (effect, selection) =>
+      effect.pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("thread-launch.account-pool.failed", { cause }).pipe(
+            Effect.as(selection),
+          ),
         ),
       ),
-    );
+  );
   const scheduledLaunches = yield* Ref.make<ReadonlySet<CommandId>>(new Set());
   yield* Effect.addFinalizer(() => Scope.close(preparationScope, Exit.void));
 
@@ -426,20 +429,23 @@ const make = Effect.gen(function* () {
         }
         let startRef = input.workspaceStrategy.baseRef;
         let baseRefName = input.workspaceStrategy.baseRef;
-        const shouldFetch =
-          input.workspaceStrategy.startFromOrigin === true &&
-          (yield* git
-            .resolveWorktreeBaseRemote({
-              cwd: project.workspaceRoot,
-              refName: input.workspaceStrategy.baseRef,
-            })
-            .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)))) !== null;
+        const remote =
+          input.workspaceStrategy.startFromOrigin === true
+            ? yield* git
+                .resolveWorktreeBaseRemote({
+                  cwd: project.workspaceRoot,
+                  refName: input.workspaceStrategy.baseRef,
+                })
+                .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)))
+            : null;
+        const shouldFetch = remote !== null;
         yield* setupTracker.stageStatus(threadId, "fetch", shouldFetch ? "running" : "skipped");
-        if (shouldFetch) {
+        if (remote !== null) {
           const remoteBase = yield* git
             .fetchWorktreeBaseCommit({
               cwd: project.workspaceRoot,
               refName: input.workspaceStrategy.baseRef,
+              remote,
             })
             .pipe(Effect.mapError(mapError(input, "provision-worktree", threadId)));
           if (remoteBase !== null) {
