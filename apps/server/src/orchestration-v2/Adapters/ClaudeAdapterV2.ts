@@ -339,6 +339,11 @@ const WORKFLOW_MEMBER_TRANSCRIPT_FLUSH_MS = 500;
 // A steer waits at most this long, from its request, for its foreground
 // subagents to move to the background before it is sent.
 const BACKGROUND_MOVE_TIMEOUT_MS = 5_000;
+// A "now" message makes Claude refuse the batch's unfinished calls in the user's voice, and
+// sessions park on it. "next" would let them finish, but one sent during a final answer starts
+// a second run that no turn owns. So the steer says what the refusal means.
+export const CLAUDE_STEER_CANCEL_NOTE =
+  '[Delivered during your turn. If a tool call just came back "The user doesn\'t want to take this action right now", this delivery cancelled it; nobody declined it. Rerun it if you still need it.]';
 // How long a Stop waits for the CLI to exit before the user is offered Force stop.
 const CLAUDE_STOP_CONFIRM_TIMEOUT_MS = 10_000;
 // Matches the stderr tail the SDK keeps for a CLI it spawns itself.
@@ -11324,7 +11329,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             );
             const userMessage = yield* makeClaudeUserMessageWithAttachments({
               text: applyClaudePromptEffortPrefix(
-                turnInput.message.text,
+                `${turnInput.message.text}\n\n${CLAUDE_STEER_CANCEL_NOTE}`,
                 compileClaudeModelSelection(currentTurn.input.modelSelection).promptEffort,
               ),
               attachments: turnInput.message.attachments,

@@ -2208,16 +2208,18 @@ describe("ClaudeAdapterV2 attachments", () => {
           );
           const expectedDocumentPath = path.join(attachmentsDir, attachmentRelativePath(document)!);
           const attachmentNotes = `\n\n[Attached image "diagram.png" is saved at: ${expectedAttachmentPath}]${resumed ? "" : `\n\n[Attached file "requirements.pdf" is saved at: ${expectedDocumentPath}]`}`;
-          const requestBlock = { type: "text" as const, text: expectedText + attachmentNotes };
-          const expectedContent = command
-            ? [
-                requestBlock,
-                expectedImageBlock,
-                ...(!resumed ? [expectedDocumentBlock] : []),
-                { type: "text" as const, text: command + attachmentNotes },
-              ]
-            : [expectedImageBlock, ...(!resumed ? [expectedDocumentBlock] : []), requestBlock];
-          assert.deepEqual(offeredMessages[0]?.message.content, expectedContent);
+          const expectedContent = (notes: string) => {
+            const requestBlock = { type: "text" as const, text: expectedText + notes };
+            return command
+              ? [
+                  requestBlock,
+                  expectedImageBlock,
+                  ...(!resumed ? [expectedDocumentBlock] : []),
+                  { type: "text" as const, text: command + notes },
+                ]
+              : [expectedImageBlock, ...(!resumed ? [expectedDocumentBlock] : []), requestBlock];
+          };
+          assert.deepEqual(offeredMessages[0]?.message.content, expectedContent(attachmentNotes));
 
           const providerTurnId = idAllocator.derive.providerTurn({
             driver: ClaudeAdapterV2.CLAUDE_PROVIDER,
@@ -2238,7 +2240,10 @@ describe("ClaudeAdapterV2 attachments", () => {
           });
 
           assert.equal(offeredMessages[1]?.priority, "now");
-          assert.deepEqual(offeredMessages[1]?.message.content, expectedContent);
+          assert.deepEqual(
+            offeredMessages[1]?.message.content,
+            expectedContent(`\n\n${ClaudeAdapterV2.CLAUDE_STEER_CANCEL_NOTE}${attachmentNotes}`),
+          );
           const documentPath = path.join(attachmentsDir, attachmentRelativePath(document)!);
           for (const scenario of [
             "pages",
@@ -2377,7 +2382,10 @@ describe("ClaudeAdapterV2 attachments", () => {
               scenario,
             );
             if (scenario === "text-only")
-              assert.equal(sent, ultrathink ? "Ultrathink:\nContinue." : "Continue.");
+              assert.equal(
+                sent,
+                `${ultrathink ? "Ultrathink:\nContinue." : "Continue."}\n\n${ClaudeAdapterV2.CLAUDE_STEER_CANCEL_NOTE}`,
+              );
             else assert.include(JSON.stringify(sent), documentPath);
           }
         }).pipe(
@@ -4755,7 +4763,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
             attachments: [attachment],
           },
         });
-        const attachmentNote = `\n\n[Attached file "requirements.pdf" is saved at: ${path.join(harness.attachmentsDir, attachmentRelativePath(attachment)!)}]`;
+        const attachmentNote = `\n\n${ClaudeAdapterV2.CLAUDE_STEER_CANCEL_NOTE}\n\n[Attached file "requirements.pdf" is saved at: ${path.join(harness.attachmentsDir, attachmentRelativePath(attachment)!)}]`;
         assert.equal(harness.offeredMessages[1]?.priority, "now");
         assert.deepEqual(harness.offeredMessages[1]?.message.content, [
           { type: "text", text: `${leadingText}${attachmentNote}` },
