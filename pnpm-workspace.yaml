@@ -298,6 +298,9 @@ permissions:
 publicHoistPattern:
   - "@cursor/sdk-*"
 
+# The T3 Code fork takes upstream's packages as they land (Jacob, Nov 7); the 4-day rule elsewhere stays.
+minimumReleaseAge: 0
+
 minimumReleaseAgeExclude:
   - "@effect/tsgo-darwin-arm64@0.67.1"
   - "@effect/tsgo-darwin-x64@0.67.1"
