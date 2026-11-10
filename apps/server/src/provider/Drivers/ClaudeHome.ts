@@ -100,13 +100,23 @@ export const hasClaudeManagedMcpConfig = Effect.fn("hasClaudeManagedMcpConfig")(
   return yield* fileSystem.exists(managedMcpConfigPath).pipe(Effect.orElseSucceed(() => false));
 });
 
+// Homes whose `projects` folder is the same folder (one links to the other's) hold the same transcripts, so a
+// thread moved between them resumes its own session instead of starting over from a handoff summary.
 export const makeClaudeContinuationGroupKey = Effect.fn("makeClaudeContinuationGroupKey")(
   function* (
     config: Pick<ClaudeSettings, "homePath">,
     environment?: NodeJS.ProcessEnv,
-  ): Effect.fn.Return<string, never, Path.Path> {
+  ): Effect.fn.Return<string, never, Path.Path | FileSystem.FileSystem> {
+    const path = yield* Path.Path;
+    const fileSystem = yield* FileSystem.FileSystem;
     const resolvedHomePath = yield* resolveClaudeHomePath(config, environment);
-    return `claude:home:${resolvedHomePath}`;
+    const transcriptsHome = yield* fileSystem
+      .realPath(path.join(resolvedHomePath, "projects"))
+      .pipe(
+        Effect.map((projects) => path.dirname(projects)),
+        Effect.orElseSucceed(() => resolvedHomePath),
+      );
+    return `claude:home:${transcriptsHome}`;
   },
 );
 

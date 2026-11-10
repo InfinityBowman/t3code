@@ -31,6 +31,25 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
       }),
     );
 
+    it.effect("groups homes whose projects folder is shared by a link", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-homes-" });
+        const first = path.join(root, "a");
+        const second = path.join(root, "b");
+        const third = path.join(root, "c");
+        yield* fileSystem.makeDirectory(path.join(first, "projects"), { recursive: true });
+        yield* fileSystem.makeDirectory(second);
+        yield* fileSystem.symlink(path.join(first, "projects"), path.join(second, "projects"));
+        yield* fileSystem.makeDirectory(path.join(third, "projects"), { recursive: true });
+
+        const key = (homePath: string) => makeClaudeContinuationGroupKey({ homePath });
+        expect(yield* key(second)).toBe(yield* key(first));
+        expect(yield* key(third)).not.toBe(yield* key(first));
+      }).pipe(Effect.scoped),
+    );
+
     it.effect("uses inherited CLAUDE_CONFIG_DIR when homePath is empty", () =>
       Effect.gen(function* () {
         const path = yield* Path.Path;
