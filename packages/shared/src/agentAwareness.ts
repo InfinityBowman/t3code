@@ -9,7 +9,10 @@ import {
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 
-import { backgroundWorkHoldsCompletion } from "./orchestrationV2PendingBackgroundWork.ts";
+import {
+  backgroundWorkHoldsCompletion,
+  monitorHoldsWakeCompletion,
+} from "./orchestrationV2PendingBackgroundWork.ts";
 
 export type AgentAwarenessPhase =
   | "starting"
@@ -75,6 +78,7 @@ export interface ProjectThreadAwarenessV2Input {
     | "latestRunRequestedAt"
     | "latestUserAuthoredMessageAt"
     | "lineage"
+    | "latestRunBackgroundWake"
     | "latestRunStopRequested"
     | "modelSelection"
     | "pendingBackgroundTasks"
@@ -100,9 +104,12 @@ export function projectThreadAwarenessV2(
   }
   if (phase === "completed" && thread.latestRunStopRequested === true) return null;
   // Resolve the phase first so live or waiting work stays visible after settlement.
+  const runStatus = thread.activityRunStatus ?? thread.status;
   if (
     thread.settledOverride === "settled" &&
-    (phase === "completed" || phase === "failed") &&
+    (phase === "completed" ||
+      phase === "failed" ||
+      (phase === "running" && runStatus === "completed")) &&
     !backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])
   ) {
     return null;
@@ -155,7 +162,11 @@ function resolveThreadAwarenessPhaseV2(
     case "waiting":
       return "running";
     case "completed":
-      if (backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? [])) return "running";
+      if (
+        backgroundWorkHoldsCompletion(thread.pendingBackgroundTasks ?? []) ||
+        monitorHoldsWakeCompletion(thread)
+      )
+        return "running";
       // A turn the user didn't start (another agent's message, a cron, a background job finishing) ends
       // quietly: the thread leaves the activity list instead of sending a Done notification.
       return startedByUser(thread) ? "completed" : null;
